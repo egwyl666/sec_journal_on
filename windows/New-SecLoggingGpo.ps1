@@ -35,7 +35,7 @@
 .PARAMETER SkipSysmon
     Startup-скрипт запускається з -SkipSysmon (лише журнали/аудит).
 
-.PARAMETER UpgradeSysmon / DisablePowerShellV2 / AllowLegacySysmon
+.PARAMETER UpgradeSysmon / DisablePowerShellV2 / AllowLegacySysmon / LegacySysmonVersion
     Передаються в startup-скрипт.
 
 .PARAMETER TranscriptionPath
@@ -60,6 +60,8 @@ param(
     [switch]$UpgradeSysmon,
     [switch]$DisablePowerShellV2,
     [switch]$AllowLegacySysmon,
+    [ValidateSet('10.42', '10.2')]
+    [string]$LegacySysmonVersion = '10.42',
     [string]$TranscriptionPath,
     [switch]$SetDomainRootSacl
 )
@@ -239,8 +241,10 @@ if (Test-Path -LiteralPath $iniPath) { $files += @{ Rel = 'sources.ini'; Pin = $
 foreach ($f in @(
         @{ Rel = 'Sysmon.zip'; Pin = $pins.SysmonZipSha256 }
         @{ Rel = 'sysmonconfig-export.xml'; Pin = $settings.Pins.ConfigSha256 }
-        @{ Rel = 'legacy\Sysmon.zip'; Pin = $pins.LegacySysmonZipSha256 }
-        @{ Rel = 'legacy\sysmonconfig-export.xml'; Pin = $settings.Pins.LegacyConfigSha256 })) {
+        @{ Rel = 'legacy\10.42\Sysmon.zip'; Pin = $settings.Pins.Legacy1042ZipSha256 }
+        @{ Rel = 'legacy\10.42\sysmonconfig-export.xml'; Pin = $settings.Pins.Legacy1042ConfigSha256 }
+        @{ Rel = 'legacy\10.2\Sysmon.zip'; Pin = $settings.Pins.Legacy102ZipSha256 }
+        @{ Rel = 'legacy\10.2\sysmonconfig-export.xml'; Pin = $settings.Pins.Legacy102ConfigSha256 })) {
     $src = Join-Path $PackagePath $f.Rel
     if (-not (Test-Path -LiteralPath $src)) {
         if (-not $SkipSysmon -and $f.Rel -notlike 'legacy*') { throw "$($f.Rel) відсутній у пакеті. Зберіть його: Set-SecurityLogging.ps1 -BuildPackage $PackagePath" }
@@ -271,7 +275,7 @@ $startupArgs = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$shar
 if ($SkipSysmon) { $startupArgs += ' -SkipSysmon' }
 if ($UpgradeSysmon) { $startupArgs += ' -UpgradeSysmon' }
 if ($DisablePowerShellV2) { $startupArgs += ' -DisablePowerShellV2' }
-if ($AllowLegacySysmon) { $startupArgs += ' -AllowLegacySysmon' }
+if ($AllowLegacySysmon) { $startupArgs += " -AllowLegacySysmon -LegacySysmonVersion $LegacySysmonVersion" }
 if ($TranscriptionPath) { $startupArgs += " -TranscriptionPath `"$TranscriptionPath`"" }
 $scriptsIni = New-ScriptsIni 'powershell.exe' $startupArgs
 

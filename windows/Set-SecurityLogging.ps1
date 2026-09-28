@@ -44,8 +44,17 @@
 
 .PARAMETER AllowLegacySysmon
     Дозволити встановлення Sysmon на Windows 7 / Server 2008 / 2008 R2 (NT 6.0/6.1).
-    Використовується Sysmon 10.42 з пакета (legacy\Sysmon.zip) або з репозиторію.
+    Версія - -LegacySysmonVersion; файли з пакета (legacy\<версія>\) або з репозиторію.
     Спершу перевірте на одному хості.
+
+.PARAMETER LegacySysmonVersion
+    Sysmon для старих ОС: 10.42 (за замовчуванням, конфіг SwiftOnSecurity схеми 4.22)
+    або 10.2 (підтримує схеми лише до 4.21, тому конфіг SwiftOnSecurity схеми 4.00, без DNS-подій).
+
+.PARAMETER ReinstallSysmon
+    Якщо встановлена версія Sysmon відрізняється від версії з пакета (старша чи новіша) -
+    видалити її й установити версію з пакета (наприклад, перехід з 10.42 на 10.2 для перевірки).
+    Якщо версії збігаються, нічого не перевстановлюється.
 
 .PARAMETER DisablePowerShellV2
     Видалити компонент рушія PowerShell 2.0 (Windows 8 / 2012 і новіші).
@@ -68,10 +77,6 @@
 .PARAMETER BuildPackage
     Зібрати офлайн-пакет у цю теку (потрібен інтернет): завантажує Sysmon і конфіги,
     перевіряє підписи/хеші, копіює цей скрипт, записує sources.ini.
-
-.PARAMETER LegacySysmonZip
-    Разом із -BuildPackage: інший Sysmon.zip для старих хостів замість vendor\sysmon\10.42
-    з репозиторію (його хеш закріплюється в sources.ini пакета).
 
 .PARAMETER AcceptNewSysmon
     Разом із -BuildPackage: прийняти Sysmon.zip, хеш якого відрізняється від
@@ -98,6 +103,9 @@ param(
     [switch]$UpgradeSysmon,
     [switch]$AllowUnpinnedSysmon,
     [switch]$AllowLegacySysmon,
+    [ValidateSet('10.42', '10.2')]
+    [string]$LegacySysmonVersion = '10.42',
+    [switch]$ReinstallSysmon,
     [switch]$DisablePowerShellV2,
     [string]$TranscriptionPath,
     [switch]$ConfigureWazuh,
@@ -105,7 +113,6 @@ param(
     [string]$ReportPath,
     [switch]$Quiet,
     [string]$BuildPackage,
-    [string]$LegacySysmonZip,
     [switch]$AcceptNewSysmon,
     [switch]$ExportSettings
 )
@@ -125,12 +132,17 @@ $DefaultPins = @{
     SysmonVersion         = ''
     ConfigUrl             = 'https://raw.githubusercontent.com/SwiftOnSecurity/sysmon-config/1836897f12fbd6a0a473665ef6abc34a6b497e31/sysmonconfig-export.xml'
     ConfigSha256          = '055febc600e6d7448cdf3812307275912927a62b1f94d0d933b64b294bc87162'
-    # Sysmon 10.42 для NT 6.0/6.1 зберігається в репозиторії (vendor\sysmon\10.42, див. README там)
-    LegacySysmonZipUrl    = 'https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/vendor/sysmon/10.42/Sysmon.zip'
-    LegacySysmonZipSha256 = '11681051bc9846130f378b5b6441ab27a05e1076dd62f58eda7c973fcf188828'
-    LegacySysmonVersion   = '10.42'
-    LegacyConfigUrl       = 'https://raw.githubusercontent.com/SwiftOnSecurity/sysmon-config/c00581f8a75671bdb1d79d6193f429ee28dc6adc/sysmonconfig-export.xml'
-    LegacyConfigSha256    = 'bf7800825bd025d77fc0af6985f6a08fb201048a772f3085564351b5a0b66e3f'
+    # Sysmon для NT 6.0/6.1 зберігається в репозиторії (vendor\sysmon\<версія>, див. README там).
+    # 10.42 підтримує схеми конфігу до 4.23 -> SwiftOnSecurity схеми 4.22 (коміт c00581f8).
+    # 10.2 підтримує схеми лише до 4.21   -> SwiftOnSecurity схеми 4.00 (коміт 9fb44e98, без DnsQuery).
+    Legacy1042ZipUrl      = 'https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/vendor/sysmon/10.42/Sysmon.zip'
+    Legacy1042ZipSha256   = '11681051bc9846130f378b5b6441ab27a05e1076dd62f58eda7c973fcf188828'
+    Legacy1042ConfigUrl   = 'https://raw.githubusercontent.com/SwiftOnSecurity/sysmon-config/c00581f8a75671bdb1d79d6193f429ee28dc6adc/sysmonconfig-export.xml'
+    Legacy1042ConfigSha256 = 'bf7800825bd025d77fc0af6985f6a08fb201048a772f3085564351b5a0b66e3f'
+    Legacy102ZipUrl       = 'https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/vendor/sysmon/10.2/Sysmon.zip'
+    Legacy102ZipSha256    = '8a07b9341eb3bc31065eca885c3398acb87da38451939f8cf468b2bdb3cf1ed9'
+    Legacy102ConfigUrl    = 'https://raw.githubusercontent.com/SwiftOnSecurity/sysmon-config/9fb44e9813ccef1e00f8a4bc22a9eb3e2d29023e/sysmonconfig-export.xml'
+    Legacy102ConfigSha256 = 'e845a2773fb4d3387cfc0e62bf2349008eeb8d1ff48be0c062fe8fa3cafea910'
 }
 
 #region ---------------------------------------------------------------- налаштування
@@ -366,6 +378,12 @@ function Get-Pins {
         foreach ($k in $h.Keys) { if ($h[$k]) { $pins[$k] = $h[$k] } }
     }
     $pins
+}
+
+function Get-LegacyKey {
+    # '10.42' -> 'Legacy1042' (префікс ключів у закріплених значеннях і sources.ini)
+    param([string]$Version)
+    'Legacy' + $Version.Replace('.', '')
 }
 
 function Get-RegValue {
@@ -792,14 +810,15 @@ function Invoke-Sysmon {
     $legacy = $HostInfo.IsLegacyOS
     if ($legacy) {
         if (-not $AllowLegacySysmon) {
-            Add-Result 'Sysmon' 'Sysmon' $(if ($state.Installed) { 'OK' } else { 'Warning' }) "Стара ОС ($($HostInfo.OSCaption)): сучасний Sysmon може спричинити зависання/BSOD. Зараз: $desc. Використайте -AllowLegacySysmon (Sysmon 10.42)."
+            Add-Result 'Sysmon' 'Sysmon' $(if ($state.Installed) { 'OK' } else { 'Warning' }) "Стара ОС ($($HostInfo.OSCaption)): сучасний Sysmon може спричинити зависання/BSOD. Зараз: $desc. Використайте -AllowLegacySysmon (Sysmon $LegacySysmonVersion)."
             return
         }
         if ([version]$HostInfo.OSVersion -ge [version]'6.1') {
             Add-Result 'Sysmon' 'Підтримка SHA-2' 'Warning' 'Server 2008 R2 / Win7: драйверу Sysmon потрібна підтримка підпису SHA-2 (KB4474419 + KB4490628). Перевірте перед встановленням.'
         }
-        $zipRel = 'legacy\Sysmon.zip'; $cfgRel = 'legacy\sysmonconfig-export.xml'
-        $zipPin = $pins.LegacySysmonZipSha256; $cfgPin = $pins.LegacyConfigSha256; $cfgUrl = $pins.LegacyConfigUrl; $zipUrl = $pins.LegacySysmonZipUrl
+        $lk = Get-LegacyKey $LegacySysmonVersion
+        $zipRel = "legacy\$LegacySysmonVersion\Sysmon.zip"; $cfgRel = "legacy\$LegacySysmonVersion\sysmonconfig-export.xml"
+        $zipPin = $pins["${lk}ZipSha256"]; $cfgPin = $pins["${lk}ConfigSha256"]; $cfgUrl = $pins["${lk}ConfigUrl"]; $zipUrl = $pins["${lk}ZipUrl"]
     }
     else {
         $zipRel = 'Sysmon.zip'; $cfgRel = 'sysmonconfig-export.xml'
@@ -815,7 +834,7 @@ function Invoke-Sysmon {
     $configOk = $state.Installed -and $state.AppliedConfigSha256 -eq $cfg.Sha256
     $needInstall = -not $state.Installed
     $zip = $null; $pkgExe = $null; $pkgVersion = $null
-    $mightUpgrade = $state.Installed -and ($UpgradeSysmon -or $AuditOnly)
+    $mightUpgrade = $state.Installed -and ($UpgradeSysmon -or $ReinstallSysmon -or $AuditOnly)
     if ($needInstall -or $mightUpgrade) {
         try {
             $zip = Resolve-SourceFile $zipRel $zipUrl $zipPin 'Sysmon.zip' -AllowUnpinned:$AllowUnpinnedSysmon
@@ -824,9 +843,16 @@ function Invoke-Sysmon {
             $pkgExe = Join-Path $extract (Get-SysmonExeName $HostInfo.Architecture)
             if (-not (Test-Path -LiteralPath $pkgExe)) { throw "$(Split-Path -Leaf $pkgExe) не знайдено в Sysmon.zip" }
             $sig = Test-MicrosoftSignature $pkgExe
-            if (-not $sig.Valid) { throw "Перевірка підпису Authenticode не пройдена: $($sig.Status) $($sig.Subject)" }
+            if (-not $sig.Valid) {
+                # Стара ОС без інтернету може не мати кореня Microsoft Root CA 2011 (NotTrusted/UnknownError).
+                # Тоді довіряємо закріпленому SHA256 (підпис перевірено при додаванні у vendor). Інші статуси - блокуємо.
+                if ($legacy -and $zipPin -and ($sig.Status -eq 'NotTrusted' -or $sig.Status -eq 'UnknownError')) {
+                    Add-Result 'Sysmon' 'Підпис' 'Warning' ("Підпис не перевірено ({0}): на системі немає кореневого сертифіката Microsoft; файл перевірено за закріпленим SHA256" -f $sig.Status)
+                }
+                else { throw "Перевірка підпису Authenticode не пройдена: $($sig.Status) $($sig.Subject)" }
+            }
             $pkgVersion = Get-VersionFromString (Get-Item -LiteralPath $pkgExe).VersionInfo.FileVersion
-            Add-Result 'Sysmon' 'Пакет' 'OK' ('v{0}, sha256={1}, підписано Microsoft' -f $pkgVersion, $zip.Sha256)
+            Add-Result 'Sysmon' 'Пакет' 'OK' ('v{0}, sha256={1}, підпис: {2}' -f $pkgVersion, $zip.Sha256, $sig.Status)
         }
         catch {
             Add-Result 'Sysmon' 'Пакет' $(if ($needInstall) { 'Error' } else { 'Warning' }) $_.Exception.Message
@@ -836,9 +862,12 @@ function Invoke-Sysmon {
 
     $installedVersion = Get-VersionFromString $state.Version
     $outdated = $state.Installed -and $pkgVersion -and $installedVersion -and ($installedVersion -lt $pkgVersion)
+    $differs = $state.Installed -and $pkgVersion -and $installedVersion -and ($installedVersion -ne $pkgVersion)
+    $doReinstall = $differs -and ($ReinstallSysmon -or ($outdated -and $UpgradeSysmon))
 
     if ($AuditOnly) {
         if ($needInstall) { Add-Result 'Sysmon' 'Sysmon' 'WouldChange' "встановити v$pkgVersion" }
+        elseif ($differs -and $ReinstallSysmon) { Add-Result 'Sysmon' 'Sysmon' 'WouldChange' "$desc -> перевстановити v$pkgVersion (-ReinstallSysmon)" }
         elseif ($outdated) { Add-Result 'Sysmon' 'Sysmon' 'WouldChange' "$desc -> v$pkgVersion (потрібен -UpgradeSysmon)" }
         else { Add-Result 'Sysmon' 'Sysmon' 'OK' $desc }
         if (-not $needInstall -and -not $configOk) { Add-Result 'Sysmon' 'Конфіг' 'WouldChange' "застосувати $($cfg.Sha256)" }
@@ -846,13 +875,16 @@ function Invoke-Sysmon {
         return
     }
 
-    if ($outdated -and $UpgradeSysmon) {
+    if ($doReinstall) {
         $r = Invoke-Native $state.Path @('-u', 'force')
         if ($r.Code -ne 0) { Add-Result 'Sysmon' 'Видалення старої версії' 'Error' $r.Output; return }
         Add-Result 'Sysmon' 'Видалення старої версії' 'Changed' "видалено $desc"
         $needInstall = $true
     }
     elseif ($outdated) { Add-Result 'Sysmon' 'Версія' 'Warning' "$desc старіший за пакет v$pkgVersion (використайте -UpgradeSysmon)" }
+    elseif ($differs) {
+        Add-Result 'Sysmon' 'Версія' 'Warning' "$desc відрізняється від пакета v$pkgVersion (для переходу: -ReinstallSysmon)"
+    }
 
     if ($needInstall) {
         $r = Invoke-Native $pkgExe @('-accepteula', '-i', $cfg.Path)
@@ -956,7 +988,7 @@ function Invoke-BuildPackage {
     param([string]$OutDir)
     $pins = Get-Pins
     New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $OutDir 'legacy') -Force | Out-Null
+    foreach ($lv in @('10.42', '10.2')) { New-Item -ItemType Directory -Path (Join-Path $OutDir "legacy\$lv") -Force | Out-Null }
 
     Write-Host "Завантаження $($pins.SysmonZipUrl)"
     $zip = Join-Path $OutDir 'Sysmon.zip'
@@ -979,7 +1011,12 @@ function Invoke-BuildPackage {
         Write-Warning "Приймаємо новий Sysmon.zip $zipHash (був $($pins.SysmonZipSha256))"
     }
 
-    foreach ($c in @(@{ Url = $pins.ConfigUrl; Pin = $pins.ConfigSha256; Rel = 'sysmonconfig-export.xml' }, @{ Url = $pins.LegacyConfigUrl; Pin = $pins.LegacyConfigSha256; Rel = 'legacy\sysmonconfig-export.xml' })) {
+    $configs = @(@{ Url = $pins.ConfigUrl; Pin = $pins.ConfigSha256; Rel = 'sysmonconfig-export.xml' })
+    foreach ($lv in @('10.42', '10.2')) {
+        $lk = Get-LegacyKey $lv
+        $configs += @{ Url = $pins["${lk}ConfigUrl"]; Pin = $pins["${lk}ConfigSha256"]; Rel = "legacy\$lv\sysmonconfig-export.xml" }
+    }
+    foreach ($c in $configs) {
         $dst = Join-Path $OutDir $c.Rel
         Write-Host "Завантаження $($c.Url)"
         Save-Download $c.Url $dst
@@ -988,35 +1025,28 @@ function Invoke-BuildPackage {
         Write-Host "  $($c.Rel) sha256: OK"
     }
 
-    # Sysmon для старих ОС: -LegacySysmonZip, інакше vendor\sysmon\10.42 з клону, інакше завантаження з репозиторію
-    $legacyHash = $pins.LegacySysmonZipSha256; $legacyVer = $pins.LegacySysmonVersion
-    $dst = Join-Path $OutDir 'legacy\Sysmon.zip'
-    $vendorZip = Join-Path $ScriptDir '..\vendor\sysmon\10.42\Sysmon.zip'
-    $legacySource = $null
-    if ($LegacySysmonZip) { $legacySource = $LegacySysmonZip }
-    elseif (Test-Path -LiteralPath $vendorZip) { $legacySource = $vendorZip }
-    if ($legacySource) { Copy-Item -LiteralPath $legacySource -Destination $dst -Force }
-    elseif ($pins.LegacySysmonZipUrl) {
-        Write-Host "Завантаження $($pins.LegacySysmonZipUrl)"
-        Save-Download $pins.LegacySysmonZipUrl $dst
-    }
-    if (-not $LegacySysmonZip -and (Test-Path -LiteralPath $dst)) {
+    # Sysmon для старих ОС: vendor\sysmon\<версія> з клону, інакше завантаження з репозиторію; хеш закріплено
+    foreach ($lv in @('10.42', '10.2')) {
+        $lk = Get-LegacyKey $lv
+        $dst = Join-Path $OutDir "legacy\$lv\Sysmon.zip"
+        $vendorZip = Join-Path $ScriptDir "..\vendor\sysmon\$lv\Sysmon.zip"
+        if (Test-Path -LiteralPath $vendorZip) { Copy-Item -LiteralPath $vendorZip -Destination $dst -Force }
+        else {
+            Write-Host "Завантаження $($pins["${lk}ZipUrl"])"
+            Save-Download $pins["${lk}ZipUrl"] $dst
+        }
         $h = Get-FileSha256 $dst
-        if ($h -ne $pins.LegacySysmonZipSha256) { throw "legacy\Sysmon.zip: хеш $h не збігається із закріпленим $($pins.LegacySysmonZipSha256)" }
-    }
-    if (Test-Path -LiteralPath $dst) {
+        if ($h -ne $pins["${lk}ZipSha256"]) { throw "legacy\$lv\Sysmon.zip: хеш $h не збігається із закріпленим $($pins["${lk}ZipSha256"])" }
         $ex = Join-Path $env:TEMP ('sysmon-' + [guid]::NewGuid())
         Expand-ZipFile $dst $ex
         foreach ($exe in @('Sysmon.exe', 'Sysmon64.exe')) {
             $p = Join-Path $ex $exe
             if (-not (Test-Path -LiteralPath $p)) { continue }
             $sig = Test-MicrosoftSignature $p
-            if (-not $sig.Valid) { throw "legacy ${exe}: недійсний підпис: $($sig.Status)" }
-            $legacyVer = [string](Get-VersionFromString (Get-Item -LiteralPath $p).VersionInfo.FileVersion)
+            if (-not $sig.Valid) { throw "legacy $lv ${exe}: недійсний підпис: $($sig.Status)" }
         }
         Remove-Item -LiteralPath $ex -Recurse -Force
-        $legacyHash = Get-FileSha256 $dst
-        Write-Host "  legacy Sysmon v$legacyVer sha256 $legacyHash"
+        Write-Host "  legacy Sysmon $lv sha256 OK, підпис Microsoft: OK"
     }
 
     Copy-Item -LiteralPath $ScriptPath -Destination (Join-Path $OutDir 'Set-SecurityLogging.ps1') -Force
@@ -1027,11 +1057,14 @@ function Invoke-BuildPackage {
         "SysmonVersion=$version"
         "ConfigUrl=$($pins.ConfigUrl)"
         "ConfigSha256=$($pins.ConfigSha256)"
-        "LegacySysmonZipUrl=$($pins.LegacySysmonZipUrl)"
-        "LegacySysmonZipSha256=$legacyHash"
-        "LegacySysmonVersion=$legacyVer"
-        "LegacyConfigUrl=$($pins.LegacyConfigUrl)"
-        "LegacyConfigSha256=$($pins.LegacyConfigSha256)"
+        "Legacy1042ZipUrl=$($pins.Legacy1042ZipUrl)"
+        "Legacy1042ZipSha256=$($pins.Legacy1042ZipSha256)"
+        "Legacy1042ConfigUrl=$($pins.Legacy1042ConfigUrl)"
+        "Legacy1042ConfigSha256=$($pins.Legacy1042ConfigSha256)"
+        "Legacy102ZipUrl=$($pins.Legacy102ZipUrl)"
+        "Legacy102ZipSha256=$($pins.Legacy102ZipSha256)"
+        "Legacy102ConfigUrl=$($pins.Legacy102ConfigUrl)"
+        "Legacy102ConfigSha256=$($pins.Legacy102ConfigSha256)"
     )
     [System.IO.File]::WriteAllLines((Join-Path $OutDir 'sources.ini'), $ini)
     Write-Host ''

@@ -203,12 +203,18 @@ Invoke-Channels $s2 'Server' @{ SystemDriveFreeMB = 100000 }
 Assert (@($global:Calls | Where-Object { $_[0] -eq 'wevtutil.exe' }).Count -eq 0 -and $Script:Counts.WouldChange -eq 1) 'AuditOnly нічого не викликає'
 $global:AuditOnly = $false
 
-Write-Host 'Sysmon 10.42 з репозиторію (vendor)'
+Write-Host 'Sysmon для старих ОС з репозиторію (vendor)'
+foreach ($lv in '10.42', '10.2') {
+    $lk = Get-LegacyKey $lv
+    $vz = Join-Path $root "vendor/sysmon/$lv/Sysmon.zip"
+    Assert (Test-Path -LiteralPath $vz) "vendor/sysmon/$lv/Sysmon.zip існує"
+    Assert ((Get-FileSha256 $vz) -eq $s.Pins["${lk}ZipSha256"]) "${lv}: хеш vendor-архіву збігається із закріпленим"
+    Assert ($s.Pins["${lk}ZipUrl"] -like "*/vendor/sysmon/$lv/Sysmon.zip") "${lv}: URL вказує на vendor"
+    Assert ($s.Pins["${lk}ConfigSha256"] -match '^[0-9a-f]{64}$') "${lv}: хеш конфігу закріплено"
+}
+Assert ($s.Pins.Legacy1042ConfigUrl -like '*c00581f8*' -and $s.Pins.Legacy102ConfigUrl -like '*9fb44e98*') 'конфіги: 10.42 -> схема 4.22, 10.2 -> схема 4.00'
+Assert ((Get-LegacyKey '10.42') -eq 'Legacy1042' -and (Get-LegacyKey '10.2') -eq 'Legacy102') 'ключі legacy-версій'
 $vendorZip = Join-Path $root 'vendor/sysmon/10.42/Sysmon.zip'
-Assert (Test-Path -LiteralPath $vendorZip) 'vendor/sysmon/10.42/Sysmon.zip існує'
-Assert ((Get-FileSha256 $vendorZip) -eq $s.Pins.LegacySysmonZipSha256) 'хеш vendor-архіву збігається із закріпленим у скрипті'
-Assert ($s.Pins.LegacySysmonZipUrl -like '*/vendor/sysmon/10.42/Sysmon.zip') 'URL legacy-архіву вказує на vendor'
-Assert ($s.Pins.LegacySysmonVersion -eq '10.42') 'версія legacy Sysmon 10.42'
 
 Write-Host 'Install-SecLogging: допоміжні функції'
 Import-ScriptFunctions $installer
@@ -221,20 +227,27 @@ Set-Content -LiteralPath (Join-Path $tmpRoot 'sec_journal_on-HEAD/windows/Set-Se
 Assert ((Find-SourceRoot $tmpRoot) -eq (Join-Path $tmpRoot 'sec_journal_on-HEAD')) 'корінь розпакованого архіву знайдено'
 Remove-Item -LiteralPath $tmpRoot -Recurse -Force
 $pkg2 = Join-Path ([IO.Path]::GetTempPath()) ('pkg2-' + [guid]::NewGuid())
-New-Item -ItemType Directory -Path (Join-Path $pkg2 'legacy') -Force | Out-Null
+foreach ($lv in '10.42', '10.2') { New-Item -ItemType Directory -Path (Join-Path $pkg2 "legacy/$lv") -Force | Out-Null }
 Set-Content -LiteralPath (Join-Path $pkg2 'Set-SecurityLogging.ps1') -Value '#'
-foreach ($f in 'Sysmon.zip', 'sysmonconfig-export.xml', 'legacy/sysmonconfig-export.xml') { Set-Content -LiteralPath (Join-Path $pkg2 $f) -Value $f -NoNewline }
-Copy-Item -LiteralPath $vendorZip -Destination (Join-Path $pkg2 'legacy/Sysmon.zip')
-$ini2 = @("SysmonZipSha256=$(Get-FileSha256 (Join-Path $pkg2 'Sysmon.zip'))", "ConfigSha256=$(Get-FileSha256 (Join-Path $pkg2 'sysmonconfig-export.xml'))", "LegacySysmonZipSha256=$($s.Pins.LegacySysmonZipSha256)", "LegacyConfigSha256=$(Get-FileSha256 (Join-Path $pkg2 'legacy/sysmonconfig-export.xml'))")
+foreach ($f in 'Sysmon.zip', 'sysmonconfig-export.xml', 'legacy/10.42/sysmonconfig-export.xml', 'legacy/10.2/sysmonconfig-export.xml') { Set-Content -LiteralPath (Join-Path $pkg2 $f) -Value $f -NoNewline }
+foreach ($lv in '10.42', '10.2') { Copy-Item -LiteralPath (Join-Path $root "vendor/sysmon/$lv/Sysmon.zip") -Destination (Join-Path $pkg2 "legacy/$lv/Sysmon.zip") }
+$ini2 = @(
+    "SysmonZipSha256=$(Get-FileSha256 (Join-Path $pkg2 'Sysmon.zip'))"
+    "ConfigSha256=$(Get-FileSha256 (Join-Path $pkg2 'sysmonconfig-export.xml'))"
+    "Legacy1042ZipSha256=$($s.Pins.Legacy1042ZipSha256)"
+    "Legacy1042ConfigSha256=$(Get-FileSha256 (Join-Path $pkg2 'legacy/10.42/sysmonconfig-export.xml'))"
+    "Legacy102ZipSha256=$($s.Pins.Legacy102ZipSha256)"
+    "Legacy102ConfigSha256=$(Get-FileSha256 (Join-Path $pkg2 'legacy/10.2/sysmonconfig-export.xml'))"
+)
 Set-Content -LiteralPath (Join-Path $pkg2 'sources.ini') -Value $ini2
 $t = Test-Package $pkg2 $true
 Assert ($t.Ok) "коректний пакет приймається [$($t.Problems -join '; ')]"
-Add-Content -LiteralPath (Join-Path $pkg2 'Sysmon.zip') -Value 'x'
+Add-Content -LiteralPath (Join-Path $pkg2 'legacy/10.2/Sysmon.zip') -Value 'x'
 $t = Test-Package $pkg2 $true
-Assert ((-not $t.Ok) -and ($t.Problems -join ' ') -match 'Sysmon.zip: SHA256') 'змінений Sysmon.zip виявлено'
-Remove-Item -LiteralPath (Join-Path $pkg2 'legacy/Sysmon.zip')
-$t = Test-Package $pkg2 $false
-Assert ($t.Ok -or ($t.Problems -join ' ') -notmatch 'legacy') 'без Sysmon legacy-файли не обов''язкові'
+Assert ((-not $t.Ok) -and ($t.Problems -join ' ') -match '10\.2.Sysmon.zip: SHA256') 'змінений legacy\10.2\Sysmon.zip виявлено'
+Remove-Item -LiteralPath (Join-Path $pkg2 'legacy/10.42/Sysmon.zip')
+$t = Test-Package $pkg2 $true
+Assert (($t.Problems -join ' ') -match 'немає legacy.10\.42.Sysmon.zip') 'відсутній legacy\10.42\Sysmon.zip виявлено'
 Remove-Item -LiteralPath $pkg2 -Recurse -Force
 
 Write-Host ''

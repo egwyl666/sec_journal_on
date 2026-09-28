@@ -81,7 +81,9 @@ param(
     [switch]$DisablePowerShellV2,
     [switch]$ConfigureWazuh,
     [string]$TranscriptionPath,
-    [string]$LegacySysmonZip,
+    [ValidateSet('10.42', '10.2')]
+    [string]$LegacySysmonVersion = '10.42',
+    [switch]$ReinstallSysmon,
     [switch]$AcceptNewSysmon,
     # --- передаються в New-SecLoggingGpo.ps1
     [string[]]$LinkTargets,
@@ -127,8 +129,10 @@ function Test-Package {
     $files = @(
         @{ Rel = 'Sysmon.zip'; Key = 'SysmonZipSha256'; Required = $NeedSysmon }
         @{ Rel = 'sysmonconfig-export.xml'; Key = 'ConfigSha256'; Required = $NeedSysmon }
-        @{ Rel = 'legacy\Sysmon.zip'; Key = 'LegacySysmonZipSha256'; Required = $NeedSysmon }
-        @{ Rel = 'legacy\sysmonconfig-export.xml'; Key = 'LegacyConfigSha256'; Required = $NeedSysmon }
+        @{ Rel = 'legacy\10.42\Sysmon.zip'; Key = 'Legacy1042ZipSha256'; Required = $NeedSysmon }
+        @{ Rel = 'legacy\10.42\sysmonconfig-export.xml'; Key = 'Legacy1042ConfigSha256'; Required = $NeedSysmon }
+        @{ Rel = 'legacy\10.2\Sysmon.zip'; Key = 'Legacy102ZipSha256'; Required = $NeedSysmon }
+        @{ Rel = 'legacy\10.2\sysmonconfig-export.xml'; Key = 'Legacy102ConfigSha256'; Required = $NeedSysmon }
     )
     foreach ($f in $files) {
         $p = Join-Path $Dir $f.Rel
@@ -266,12 +270,12 @@ if ($NoBuild) {
     }
     Write-Host '    наявний пакет перевірено (-NoBuild)'
 }
-elseif ($check.Ok -and -not $Rebuild -and -not $LegacySysmonZip) {
+elseif ($check.Ok -and -not $Rebuild) {
     Write-Host '    наявний пакет коректний, використовується повторно (-Rebuild щоб зібрати заново)'
 }
 else {
     if (-not $check.Ok -and (Test-Path -LiteralPath $PackagePath)) { Write-Host ("    збираємо заново: {0}" -f ($check.Problems -join '; ')) }
-    $buildArgs = Add-SwitchArgs @('-BuildPackage', $PackagePath) @{ LegacySysmonZip = $LegacySysmonZip; AcceptNewSysmon = $AcceptNewSysmon } @('LegacySysmonZip', 'AcceptNewSysmon')
+    $buildArgs = Add-SwitchArgs @('-BuildPackage', $PackagePath) @{ AcceptNewSysmon = $AcceptNewSysmon } @('AcceptNewSysmon')
     $code = Invoke-ChildScript (Join-Path $srcWindows 'Set-SecurityLogging.ps1') $buildArgs
     if ($code -ne 0) { Write-Host "    збирання пакета завершилося з кодом $code" -ForegroundColor Red; exit $code }
     $check = Test-Package $PackagePath $needSysmon
@@ -290,8 +294,9 @@ if ($UpdateRepoPins) {
 # ---- 3. дія
 $localArgs = Add-SwitchArgs @('-SourcePath', $PackagePath) @{
     AuditOnly = $AuditOnly; SkipSysmon = $SkipSysmon; UpgradeSysmon = $UpgradeSysmon; AllowUnpinnedSysmon = $AllowUnpinnedSysmon
-    AllowLegacySysmon = $AllowLegacySysmon; DisablePowerShellV2 = $DisablePowerShellV2; ConfigureWazuh = $ConfigureWazuh; TranscriptionPath = $TranscriptionPath
-} @('AuditOnly', 'SkipSysmon', 'UpgradeSysmon', 'AllowUnpinnedSysmon', 'AllowLegacySysmon', 'DisablePowerShellV2', 'ConfigureWazuh', 'TranscriptionPath')
+    AllowLegacySysmon = $AllowLegacySysmon; LegacySysmonVersion = $LegacySysmonVersion; ReinstallSysmon = $ReinstallSysmon
+    DisablePowerShellV2 = $DisablePowerShellV2; ConfigureWazuh = $ConfigureWazuh; TranscriptionPath = $TranscriptionPath
+} @('AuditOnly', 'SkipSysmon', 'UpgradeSysmon', 'AllowUnpinnedSysmon', 'AllowLegacySysmon', 'LegacySysmonVersion', 'ReinstallSysmon', 'DisablePowerShellV2', 'ConfigureWazuh', 'TranscriptionPath')
 
 switch ($Mode) {
     'Build' {
@@ -311,6 +316,11 @@ switch ($Mode) {
         $remote = Test-Package $SharePath $needSysmon
         if (-not $remote.Ok) { Write-Host ("    перевірка копії не пройдена: {0}" -f ($remote.Problems -join '; ')) -ForegroundColor Red; exit 2 }
         Copy-Item -LiteralPath $InstallerPath -Destination $SharePath -Force
+        # стендовий скрипт для старих ОС і теки для оновлень (.msu) та результатів
+        if ($srcWindows -and (Test-Path -LiteralPath (Join-Path $srcWindows 'lab'))) {
+            Copy-Item -LiteralPath (Join-Path $srcWindows 'lab') -Destination $SharePath -Recurse -Force
+        }
+        foreach ($d in @('updates', 'results')) { New-Item -ItemType Directory -Path (Join-Path $SharePath $d) -Force | Out-Null }
         Write-Host '    скопійовано й перевірено' -ForegroundColor Green
         Write-Host ''
         Write-Host '    Права на шару: Domain Computers / Authenticated Users - лише читання, адміністратори - запис.' -ForegroundColor Yellow
@@ -325,8 +335,9 @@ switch ($Mode) {
         if (-not $gpoScript -or -not (Test-Path -LiteralPath $gpoScript)) { Write-Host '    не знайдено New-SecLoggingGpo.ps1' -ForegroundColor Red; exit 2 }
         $gpoArgs = Add-SwitchArgs @('-PackagePath', $PackagePath) @{
             LinkTargets = $LinkTargets; SetDomainRootSacl = $SetDomainRootSacl; SkipSysmon = $SkipSysmon; UpgradeSysmon = $UpgradeSysmon
-            DisablePowerShellV2 = $DisablePowerShellV2; AllowLegacySysmon = $AllowLegacySysmon; TranscriptionPath = $TranscriptionPath; WhatIf = $WhatIfGpo
-        } @('LinkTargets', 'SetDomainRootSacl', 'SkipSysmon', 'UpgradeSysmon', 'DisablePowerShellV2', 'AllowLegacySysmon', 'TranscriptionPath', 'WhatIf')
+            DisablePowerShellV2 = $DisablePowerShellV2; AllowLegacySysmon = $AllowLegacySysmon; LegacySysmonVersion = $LegacySysmonVersion
+            TranscriptionPath = $TranscriptionPath; WhatIf = $WhatIfGpo
+        } @('LinkTargets', 'SetDomainRootSacl', 'SkipSysmon', 'UpgradeSysmon', 'DisablePowerShellV2', 'AllowLegacySysmon', 'LegacySysmonVersion', 'TranscriptionPath', 'WhatIf')
         $code = Invoke-ChildScript $gpoScript $gpoArgs
         exit $code
     }
