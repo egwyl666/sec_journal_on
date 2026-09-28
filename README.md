@@ -1,215 +1,246 @@
-# sec_journal_on — включение журналов безопасности и телеметрии
+# sec_journal_on — security log and telemetry enablement
 
-Скрипты, которые на Windows (рабочие станции, серверы, DC) и Linux:
+**English** | [Українська](README.uk.md)
 
-1. **определяют, что за машина** (роль, ОС, домен, язык, архитектура, свободное место);
-2. **проверяют текущее состояние** журналов, аудита, Sysmon, Wazuh;
-3. **включают/увеличивают только недостающее** (размеры только растут, аудит только добавляется);
-4. **перепроверяют** результат и пишут отчёт (консоль + JSON + событие для SIEM).
+Scripts for Windows (workstations, servers, domain controllers) and Linux that:
 
-Любой скрипт можно сначала запустить в режиме «только посмотреть» (`-AuditOnly` / `--check`).
+1. **detect the machine**: role, OS, domain membership, language, architecture, free space;
+2. **check the current state** of event logs, audit policy, Sysmon and Wazuh;
+3. **enable or raise only what is missing**: log sizes only grow, audit settings are only added;
+4. **re-check** the result and write a report (console + JSON + an event for the SIEM).
+
+Every script has a read-only mode (`-AuditOnly` / `--check`) that shows what it would change.
 
 ```
-windows/Set-SecurityLogging.ps1   единый скрипт для любой Windows (WS / Server / DC), PS 2.0+
-windows/New-SecLoggingGpo.ps1     надстройка GPO для домена (запускать на DC)
-linux/set-security-logging.sh     единый скрипт для Linux (Debian/Ubuntu, RHEL/Rocky/Alma, SUSE)
-wazuh/shared/<group>/agent.conf   централизованный сбор журналов для групп Wazuh-менеджера
-tests/                            тесты (pwsh + docker)
+windows/Set-SecurityLogging.ps1   single script for any Windows (WS / Server / DC), PowerShell 2.0+
+windows/New-SecLoggingGpo.ps1     domain GPO add-on (run on a DC)
+linux/set-security-logging.sh     single script for Linux (Debian/Ubuntu, RHEL/Rocky/Alma, SUSE)
+wazuh/shared/<group>/agent.conf   centralized log collection for Wazuh manager groups
+tests/                            tests (pwsh + docker)
 ```
+
+> Help text, comments and console messages inside the scripts are in Ukrainian. Machine-readable values stay in English: statuses (`OK`, `Changed`, `WouldChange`, `Warning`, `Error`, `Skipped`), JSON keys, parameter names, log channel names. This keeps SIEM rules and filters simple.
+> The `.ps1` files are saved as **UTF-8 with BOM**. Without the BOM, Windows PowerShell 5.1/2.0 reads the Cyrillic text incorrectly. If you edit the scripts, keep the BOM.
 
 ---
 
 ## Windows
 
-### Три способа установки
+### Three installation modes
 
-| Сценарий | Когда | Как |
+| Mode | When | How |
 |---|---|---|
-| **1. Online** | есть интернет, машина вне домена или разовый запуск | `Set-SecurityLogging.ps1` — Sysmon скачивается с `download.sysinternals.com`, конфиг с GitHub (закреплённый коммит), всё проверяется по SHA256 |
-| **2. Offline-пакет** | нет интернета (флешка, шара) | один раз собрать пакет `-BuildPackage`, потом `Set-SecurityLogging.ps1 -SourcePath <папка или \\server\share>` |
-| **3. GPO** | доменные машины | на DC: `New-SecLoggingGpo.ps1` — выкладывает пакет в `NETLOGON\SecLogging` и создаёт GPO со startup-скриптом (сценарий 2 на каждой машине при загрузке) + политики аудита |
+| **1. Online** | internet access, machine outside the domain, one-off run | `Set-SecurityLogging.ps1`: Sysmon is downloaded from `download.sysinternals.com` and the config from GitHub (pinned commit). Everything is checked against SHA256 |
+| **2. Offline package** | no internet (USB stick, file share) | build the package once with `-BuildPackage`, then run `Set-SecurityLogging.ps1 -SourcePath <folder or \\server\share>` |
+| **3. GPO** | domain machines | on the DC, `New-SecLoggingGpo.ps1` copies the package to `NETLOGON\SecLogging` and creates GPOs with a startup script (mode 2 on every boot) plus the audit policy |
 
-### Шаг 0. Собрать пакет и закрепить хеш Sysmon (один раз, на машине с интернетом)
+### Step 0. Build the package and pin the Sysmon hash (once, on a machine with internet)
 
 ```powershell
 .\windows\Set-SecurityLogging.ps1 -BuildPackage D:\SecLogging
 ```
 
-Скрипт скачивает `Sysmon.zip`, проверяет **подпись Microsoft** (Authenticode) у `Sysmon.exe/Sysmon64.exe/Sysmon64a.exe`, считает SHA256, скачивает конфиги SwiftOnSecurity (их хеши уже закреплены в скрипте) и пишет `sources.ini` со всеми хешами.
+The script:
+- downloads `Sysmon.zip`;
+- checks the **Microsoft Authenticode signature** of `Sysmon.exe`, `Sysmon64.exe` and `Sysmon64a.exe`;
+- computes the SHA256;
+- downloads the SwiftOnSecurity configs (their hashes are already pinned in the script);
+- writes `sources.ini` with all hashes.
 
-**Скопируйте `D:\SecLogging\sources.ini` в `windows\sources.ini` и закоммитьте** — после этого и online-режим будет проверять Sysmon.zip по закреплённому хешу.
+**Copy `D:\SecLogging\sources.ini` to `windows\sources.ini` and commit it.** After that, online installs also check Sysmon.zip against the pinned hash.
 
-> Хеш `Sysmon.zip` меняется с каждым релизом Microsoft. Если хеш не совпал — скрипт **останавливается** (новый релиз или подмена). Обновление: `-BuildPackage ... -AcceptNewSysmon` (подпись всё равно проверяется), затем снова закоммитить `sources.ini`.
-> Без закреплённого хеша online-установка Sysmon откажет; обойти можно только явно: `-AllowUnpinnedSysmon` (останется только проверка подписи).
+> The `Sysmon.zip` hash changes with every Microsoft release. If the hash does not match, the script **stops**: it is either a new release or tampering. To update, run `-BuildPackage ... -AcceptNewSysmon` (the signature is still checked) and commit `sources.ini` again.
+> Without a pinned hash, online Sysmon installation is refused. The only way around it is explicit: `-AllowUnpinnedSysmon`, which leaves only the signature check.
 
-### Сценарий 1/2: запуск на машине
+### Modes 1 and 2: running on a machine
 
 ```powershell
-# посмотреть, что будет сделано (ничего не меняет)
+# show what would be done (changes nothing)
 powershell -ExecutionPolicy Bypass -File .\Set-SecurityLogging.ps1 -AuditOnly
 
-# применить (online)
+# apply (online)
 powershell -ExecutionPolicy Bypass -File .\Set-SecurityLogging.ps1
 
-# применить из пакета
+# apply from a package
 powershell -ExecutionPolicy Bypass -File .\Set-SecurityLogging.ps1 -SourcePath \\fileserver\SecLogging
 ```
 
-Полезные ключи:
-
-| Ключ | Что делает |
+| Switch | What it does |
 |---|---|
-| `-AuditOnly` | только отчёт, ничего не меняет |
-| `-Role Workstation\|Server\|DomainController` | переопределить определённую роль |
-| `-SkipSysmon` / `-UpgradeSysmon` | не трогать Sysmon / обновить старую версию (uninstall + install) |
-| `-DisablePowerShellV2` | удалить компонент PowerShell 2.0 (см. ниже) |
-| `-TranscriptionPath <путь>` | включить PowerShell Transcription (локальная папка получает write-only ACL) |
-| `-ConfigureWazuh` | дописать недостающие `eventchannel` в `ossec.conf` локального агента |
-| `-AllowLegacySysmon` | разрешить Sysmon на 2008/2008 R2/Win7 (см. ниже) |
-| `-Quiet` | только итог (для GPO) |
+| `-AuditOnly` | report only, changes nothing |
+| `-Role Workstation\|Server\|DomainController` | override the detected role |
+| `-SkipSysmon` / `-UpgradeSysmon` | leave Sysmon alone / upgrade an old version (uninstall + install) |
+| `-DisablePowerShellV2` | remove the PowerShell 2.0 feature (see below) |
+| `-TranscriptionPath <path>` | enable PowerShell Transcription (a local folder gets a write-only ACL) |
+| `-ConfigureWazuh` | add missing `eventchannel` entries to the local agent `ossec.conf` |
+| `-AllowLegacySysmon` | allow Sysmon on 2008/2008 R2/Win7 (see below) |
+| `-Quiet` | print only the summary (for GPO) |
 
-Результат: `C:\ProgramData\SecLogging\last-report.json` + событие в журнале **Application**, источник `SecLogging` (ID 1000 — всё ок, 1001 — есть предупреждения, 1002 — ошибки). По нему в Wazuh удобно ловить машины, где настройка «разъехалась».
+Results:
+- a JSON report in `C:\ProgramData\SecLogging\last-report.json`;
+- an event in the **Application** log, source `SecLogging`: ID 1000 means everything is fine, 1001 means warnings, 1002 means errors. In Wazuh this makes it easy to find machines whose settings have drifted.
 
-Коды выхода: `0` — ок, `2` — были ошибки, `3` — не администратор.
+Exit codes: `0` success, `2` errors occurred, `3` not running as administrator.
 
-### Сценарий 3: GPO (на DC1)
+### Mode 3: GPO (on DC1)
 
 ```powershell
-# сухой прогон
+# dry run
 .\windows\New-SecLoggingGpo.ps1 -PackagePath D:\SecLogging -WhatIf
 
-# применить + SACL на корень домена для 4662 (DCSync)
+# apply, plus a SACL on the domain root for 4662 (DCSync)
 .\windows\New-SecLoggingGpo.ps1 -PackagePath D:\SecLogging -SetDomainRootSacl
 ```
 
-Создаются **две отдельные GPO** (Default Domain Policy / Default DC Policy не трогаются):
+The script creates **two separate GPOs**. Default Domain Policy and Default Domain Controllers Policy are not touched.
 
-| GPO | Привязка | Содержимое |
+| GPO | Linked to | Contents |
 |---|---|---|
-| `SEC-Logging-Baseline` | корень домена (или `-LinkTargets`) | Advanced Audit Policy (набор WS/Server), Force subcategory, cmdline в 4688, PowerShell ScriptBlock/Module logging (5.1 и 7), аудит NTLM, startup-скрипт |
-| `SEC-Logging-DomainControllers` | OU=Domain Controllers | полный набор аудита DC (Kerberos, DS Access…), размеры Security/System/Application для DC, `AuditNTLMInDomain`, LDAP-диагностика (2889), startup-скрипт |
+| `SEC-Logging-Baseline` | domain root (or `-LinkTargets`) | Advanced Audit Policy (WS/Server set), force subcategories, command line in 4688, PowerShell ScriptBlock/Module logging (5.1 and 7), NTLM auditing, startup script |
+| `SEC-Logging-DomainControllers` | OU=Domain Controllers | full DC audit set (Kerberos, DS Access…), Security/System/Application sizes for DCs, `AuditNTLMInDomain`, LDAP diagnostics (2889), startup script |
 
-Startup-скрипт каждую загрузку запускает `\\domain\NETLOGON\SecLogging\Set-SecurityLogging.ps1 -SourcePath ... -Quiet`: включает operational-журналы, выставляет размеры по роли, ставит/проверяет Sysmon. Повторные запуски ничего не меняют, если всё уже настроено.
+On every boot, the startup script runs `\\domain\NETLOGON\SecLogging\Set-SecurityLogging.ps1 -SourcePath ... -Quiet`. It enables the operational logs, sets sizes by role, and installs or checks Sysmon. If everything is already configured, repeated runs change nothing.
 
-Advanced Audit Policy нельзя задать через `Set-GPRegistryValue`, поэтому скрипт пишет `audit.csv` в SYSVOL, регистрирует CSE в `gPCMachineExtensionNames` и повышает версию GPO. **Это место обязательно проверить на стенде:**
+Advanced Audit Policy cannot be set with `Set-GPRegistryValue`. The script therefore writes `audit.csv` to SYSVOL itself, registers the client-side extension in `gPCMachineExtensionNames` and bumps the GPO version. **Test this part in a lab first:**
 
 ```cmd
 gpupdate /force
-gpresult /h C:\gp.html          :: обе SEC-Logging GPO применились?
-auditpol /get /category:*        :: подкатегории выставлены?
-type C:\ProgramData\SecLogging\last-report.json   :: после перезагрузки
+gpresult /h C:\gp.html          :: were both SEC-Logging GPOs applied?
+auditpol /get /category:*        :: are the subcategories set?
+type C:\ProgramData\SecLogging\last-report.json   :: after a reboot
 ```
 
-Если на машину уже приходит GPO с размерами журналов или аудитом слабее нашего, локальный скрипт это **видит и пишет Warning** («GPO limits size…», «GPO will overwrite…»), а не делает вид, что всё применилось.
+Sometimes a GPO already sets smaller log sizes or weaker audit settings than ours. The local script **detects this and reports a Warning** instead of pretending the change was applied.
 
-### Что настраивается
+### What gets configured
 
-**Журналы** (включаются, если выключены; размер только растёт; режим — *Overwrite as needed*):
+**Event logs.** Disabled logs are enabled. Sizes only grow. Retention is set to *Overwrite events as needed*, so logs never stop or fill the disk.
 
-| Класс | Журналы | WS | Server | DC |
+| Class | Logs | WS | Server | DC |
 |---|---|---|---|---|
-| Security | Security | 768 МБ | 1.5 ГБ | 3 ГБ |
-| Sysmon | Microsoft-Windows-Sysmon/Operational | 512 МБ | 1 ГБ | 1.5 ГБ |
-| PowerShell | PowerShell/Operational, Windows PowerShell, PowerShellCore/Operational | 384 МБ | 768 МБ | 1 ГБ |
-| System | System | 192 МБ | 256 МБ | 384 МБ |
-| Application | Application | 192 МБ | 256 МБ | 256 МБ |
-| DirSvc | Directory Service (DC) | — | — | 512 МБ |
-| Other | Defender, TaskScheduler, TerminalServices-* / RdpCoreTS, WMI-Activity, Bits-Client, CodeIntegrity, AppLocker/*, NTLM, DNS-Client, Firewall, PrintService, WinRM, SMBServer/SMBClient Security, OpenSSH, DriverFrameworks-UserMode (USB), Security-Mitigations, LSA; на DC ещё DNS Server, DNSServer/Audit, DFS Replication | 96 МБ | 192 МБ | 192 МБ |
+| Security | Security | 768 MB | 1.5 GB | 3 GB |
+| Sysmon | Microsoft-Windows-Sysmon/Operational | 512 MB | 1 GB | 1.5 GB |
+| PowerShell | PowerShell/Operational, Windows PowerShell, PowerShellCore/Operational | 384 MB | 768 MB | 1 GB |
+| System | System | 192 MB | 256 MB | 384 MB |
+| Application | Application | 192 MB | 256 MB | 256 MB |
+| DirSvc | Directory Service (DC) | — | — | 512 MB |
+| Other | Defender, TaskScheduler, TerminalServices-* / RdpCoreTS, WMI-Activity, Bits-Client, CodeIntegrity, AppLocker/*, NTLM, DNS-Client, Firewall, PrintService, WinRM, SMBServer/SMBClient Security, OpenSSH, DriverFrameworks-UserMode (USB), Security-Mitigations, LSA; on DCs also DNS Server, DNSServer/Audit, DFS Replication | 96 MB | 192 MB | 192 MB |
 
-Если прирост не влезает в 50 % свободного места на системном диске, профиль понижается (DC → Server → Workstation → Minimal) с предупреждением. Журналов, которых нет на машине (например, DNS Server не на DNS-сервере), скрипт просто пропускает.
+If the growth does not fit into 50% of the free space on the system drive, the profile steps down (DC → Server → Workstation → Minimal) with a warning. Logs that do not exist on the machine are skipped, for example DNS Server on a host without the DNS role.
 
-**Advanced Audit Policy** — по GUID подкатегорий (не зависит от языка ОС: RU/UA/EN), только добавляет Success/Failure, никогда не выключает. Полный список — таблица `$auditTable` в `Set-SecurityLogging.ps1`.
+**Advanced Audit Policy** is set by subcategory GUID, so it works the same on RU/UA/EN Windows. The script only adds Success/Failure and never disables anything. The full list is the `$auditTable` table in `Set-SecurityLogging.ps1`.
 
-**Реестр:** `SCENoApplyLegacyAuditPolicy=1`, `ProcessCreationIncludeCmdLine_Enabled=1`, ScriptBlock + Module logging (`*`) для Windows PowerShell и PowerShell 7, `AuditReceivingNTLMTraffic=2`, `RestrictSendingNTLMTraffic=1` (только аудит), на DC `AuditNTLMInDomain=7` и `16 LDAP Interface Events=2`.
+**Registry:**
+- `SCENoApplyLegacyAuditPolicy=1`;
+- `ProcessCreationIncludeCmdLine_Enabled=1`;
+- ScriptBlock and Module logging (`*`) for Windows PowerShell and PowerShell 7;
+- `AuditReceivingNTLMTraffic=2`, `RestrictSendingNTLMTraffic=1` (audit only);
+- on DCs, `AuditNTLMInDomain=7` and `16 LDAP Interface Events=2`.
 
-### PowerShell 2.0 — зачем отключать
+### PowerShell 2.0: why disable it
 
-Движок PowerShell 2.0 появился раньше всех механизмов защиты: в нём **нет** Script Block Logging (4104), Module Logging в нормальном виде, AMSI и Constrained Language Mode. Если компонент установлен, атакующий запускает `powershell.exe -Version 2 -c ...`, и весь его код проходит мимо журналов, которые мы настраиваем. В журнале «Windows PowerShell» останется только событие 400 с `EngineVersion=2.0`. Ловить это событие полезно, но если просто удалить движок, такой обход вообще невозможен.
+The PowerShell 2.0 engine predates all the protection mechanisms. It has **no** Script Block Logging (4104), no proper Module Logging, no AMSI and no Constrained Language Mode. If the feature is installed, an attacker can run `powershell.exe -Version 2 -c ...`, and their code bypasses all the logging we configure. The only trace is event 400 in the "Windows PowerShell" log with `EngineVersion=2.0`. Removing the engine closes the bypass completely.
 
-* Win10/11 и Server 2016+: компонент `MicrosoftWindowsPowerShellV2(Root)` есть, но нужен почти никому. В Win11 24H2 и Server 2025 его уже убрали сами Microsoft. Ломается только очень старый софт, который явно вызывает `-Version 2`, например древние скрипты Exchange 2010 или SCCM.
-* 2008/2008 R2: там 2.0 и есть основной PowerShell, удалить его нельзя (скрипт это учитывает).
-* По умолчанию скрипт только **предупреждает**. Удаляет с ключом `-DisablePowerShellV2`. Рекомендую сначала пройтись с `-AuditOnly` и посмотреть, на скольких машинах компонент включён.
+* **Win10/11 and Server 2016+:** the `MicrosoftWindowsPowerShellV2(Root)` feature is present but almost nobody needs it. Microsoft removed it in Win11 24H2 and Server 2025. Only very old software that explicitly calls `-Version 2` breaks, such as old Exchange 2010 or SCCM scripts.
+* **2008/2008 R2:** 2.0 is the main PowerShell and cannot be removed. The script takes this into account.
+* **Default behaviour:** the script only **warns**. It removes the feature only with `-DisablePowerShellV2`. Run `-AuditOnly` across the fleet first to see how many machines have it enabled.
 
-### Старые системы (2008 / 2008 R2 / Win7)
+### Legacy systems (2008 / 2008 R2 / Win7)
 
-* Журналы, аудит и реестр настраиваются, скрипт совместим с PowerShell 2.0 и .NET 3.5.
-* **Sysmon по умолчанию не ставится.** Современный Sysmon на NT 6.0/6.1 не поддерживается, известны зависания и BSOD. Стабильной для 2008 R2 считается версия **10.42**, её нет на сайте Microsoft, архив нужно найти самим.
-  * Собрать пакет: `-BuildPackage D:\SecLogging -LegacySysmonZip D:\Sysmon-10.42.zip` (подпись проверяется, хеш закрепляется).
-  * Установка: `-AllowLegacySysmon`. Для legacy используется **старый конфиг SwiftOnSecurity со схемой 4.22** (текущий требует Sysmon 13+). Он уже закреплён в скрипте.
-  * На 2008 R2 для драйвера нужны обновления SHA-2 (KB4474419, KB4490628).
-  * **Сначала на одном хосте.**
-* Командная строка в 4688 на 2008 R2 появляется только с KB3004375.
+* Logs, audit policy and registry settings are configured. The script works with PowerShell 2.0 and .NET 3.5.
+* **Sysmon is not installed by default.** Modern Sysmon does not support NT 6.0/6.1, and hangs and BSODs have been reported. Version **10.42** is considered stable on 2008 R2. Microsoft no longer hosts it, so you have to find the archive yourself.
+  * Build the package: `-BuildPackage D:\SecLogging -LegacySysmonZip D:\Sysmon-10.42.zip`. The signature is checked and the hash is pinned.
+  * Install with `-AllowLegacySysmon`. Legacy hosts get the **old SwiftOnSecurity config with schema 4.22**, because the current config needs Sysmon 13+. Its hash is already pinned in the script.
+  * On 2008 R2, the driver needs the SHA-2 updates KB4474419 and KB4490628.
+  * **Try it on one host first.**
+* On 2008 R2, the command line in 4688 appears only with KB3004375.
 
-### Конфиг Sysmon
+### Sysmon config
 
-SwiftOnSecurity `sysmonconfig-export.xml`, закреплён на коммите `1836897` (SHA256 в скрипте). Учтите, что репозиторий не обновлялся с октября 2021. Если позже захотите olafhartong/sysmon-modular, достаточно поменять `ConfigUrl`/`ConfigSha256` в `sources.ini`, код трогать не нужно.
+SwiftOnSecurity `sysmonconfig-export.xml`, pinned to commit `1836897` (SHA256 in the script). Note that the repository has not been updated since October 2021. To switch to olafhartong/sysmon-modular later, change `ConfigUrl` and `ConfigSha256` in `sources.ini`; no code changes are needed.
 
 ---
 
 ## Linux
 
 ```bash
-sudo ./linux/set-security-logging.sh --check          # только отчёт
-sudo ./linux/set-security-logging.sh                  # применить
+sudo ./linux/set-security-logging.sh --check          # report only
+sudo ./linux/set-security-logging.sh                  # apply
 sudo ./linux/set-security-logging.sh --with-sysmon --configure-wazuh
 ```
 
-| Что | Как |
+| What | How |
 |---|---|
-| Определение | `/etc/os-release` → семейство deb/rpm/suse; workstation, если `graphical.target`, иначе server; контейнер; свободное место на `/var` |
-| auditd | установка пакета; `auditd.conf`: `max_log_file` 50/100 МБ × `num_logs` 10, `ROTATE`, `ENRICHED` (если auditd ≥ 2.6) |
-| Правила | `/etc/audit/rules.d/50-seclogging.rules`: identity, sudoers, PAM, SSH, cron/at/systemd/rc/profile, ld.so.preload, модули ядра, hostname, время, ptrace-инъекции, mount, execve пользовательских сессий (ключ `audit-wazuh-c` под штатные правила Wazuh), execve от web-пользователей (`webshell`). Строки `-w` пишутся, только если путь существует. Если стоит immutable (`-e 2`), скрипт предупреждает, что нужна перезагрузка. `--immutable` сам добавляет `-e 2` |
-| journald | `Storage=persistent`, `SystemMaxUse` 1G (WS) / 2G (server) через drop-in, только увеличение |
-| auth log | наличие rsyslog и `/var/log/auth.log` / `/var/log/secure`, проверка ротации logrotate (≥ 7 дней) |
-| Sysmon for Linux | `--with-sysmon`: репозиторий packages.microsoft.com (подписанный GPG) или offline `--sysmon-package-dir DIR` (обязателен `SHA256SUMS`), встроенный конфиг (процессы, сеть без loopback, создание файлов в местах persistence) |
-| Wazuh | проверка агента и сбора audit/auth. С ключом `--configure-wazuh` дописывает управляемый блок в `ossec.conf` |
+| Detection | `/etc/os-release` gives the deb/rpm/suse family. `graphical.target` means workstation, otherwise server. Also checks for a container and the free space on `/var` |
+| auditd | installs the package. `auditd.conf`: `max_log_file` 50/100 MB × `num_logs` 10, `ROTATE`, `ENRICHED` (auditd ≥ 2.6) |
+| Rules | `/etc/audit/rules.d/50-seclogging.rules`: identity, sudoers, PAM, SSH, cron/at/systemd/rc/profile, ld.so.preload, kernel modules, hostname, time, ptrace injection, mounts, execve in user sessions (key `audit-wazuh-c` for the stock Wazuh rules), execve by web server accounts (`webshell`). `-w` lines are written only if the path exists. If immutable mode (`-e 2`) is on, the script warns that a reboot is needed. `--immutable` adds `-e 2` itself |
+| journald | `Storage=persistent`, `SystemMaxUse` 1G (WS) / 2G (server) via a drop-in, only increased |
+| Auth log | checks for rsyslog and `/var/log/auth.log` / `/var/log/secure`, and that logrotate keeps at least 7 days |
+| Sysmon for Linux | `--with-sysmon`: installs from packages.microsoft.com (GPG-signed) or offline via `--sysmon-package-dir DIR` (a `SHA256SUMS` file is required). Uses a built-in config: processes, network except loopback, file creation in persistence locations |
+| Wazuh | checks the agent and whether audit/auth logs are collected. With `--configure-wazuh`, appends a managed block to `ossec.conf` |
 
-Отчёт: `/var/log/seclogging/last-report.json`. Итоговая строка уходит в syslog (`seclogging`).
+The report goes to `/var/log/seclogging/last-report.json`, and a summary line is sent to syslog (tag `seclogging`).
 
-**Есть ли смысл в Sysmon for Linux?** Умеренный. auditd остаётся основой. Sysmon добавляет сетевые соединения с привязкой к процессу (через auditd это шумно и неудобно) и общую с Windows схему событий. Минусы: нужен eBPF (ядро ≥ 4.15), пакет не из репозиториев дистрибутива, события приходят в syslog в виде XML, и **Wazuh нужны дополнительные декодеры**. Поэтому по умолчанию он выключен. Предлагаю включить на паре серверов и посмотреть на объём событий.
+**Is Sysmon for Linux worth it?** Moderately. auditd remains the foundation. Sysmon adds network connections tied to processes, which is noisy and awkward with auditd, and the same event schema as Windows. The downsides:
+- it needs eBPF (kernel ≥ 4.15);
+- the package is not in the distribution repositories;
+- events arrive in syslog as XML, and **Wazuh needs extra decoders** for them.
+
+That is why it is off by default. Try it on a couple of servers and look at the event volume first.
 
 ---
 
 ## Wazuh
 
-Централизованно через группы менеджера (рекомендуется вместо правки `ossec.conf` на каждом агенте):
+Configure log collection centrally through manager groups. This is recommended over editing `ossec.conf` on every agent.
 
 ```bash
-# на менеджере
+# on the manager
 for g in windows windows-dc linux linux-journald; do
   /var/ossec/bin/agent_groups -a -g $g -q
   cp wazuh/shared/$g/agent.conf /var/ossec/etc/shared/$g/agent.conf
 done
-/var/ossec/bin/agent_groups -a -i <ID> -g windows      # все Windows
-/var/ossec/bin/agent_groups -a -i <ID> -g windows-dc   # DC дополнительно
-/var/ossec/bin/agent_groups -a -i <ID> -g linux        # все Linux
-/var/ossec/bin/agent_groups -a -i <ID> -g linux-journald   # Linux без rsyslog (Wazuh 4.8+)
+/var/ossec/bin/agent_groups -a -i <ID> -g windows          # all Windows agents
+/var/ossec/bin/agent_groups -a -i <ID> -g windows-dc       # DCs, in addition
+/var/ossec/bin/agent_groups -a -i <ID> -g linux            # all Linux agents
+/var/ossec/bin/agent_groups -a -i <ID> -g linux-journald   # Linux without rsyslog (Wazuh 4.8+)
 ```
 
-`windows/agent.conf` сгенерирован из того же списка журналов, что и скрипт. DNS-Client/Operational намеренно не отправляется: он очень шумный, а DNS-запросы уже есть в Sysmon (событие 22).
+`windows/agent.conf` is generated from the same channel list as the script. DNS-Client/Operational is deliberately not forwarded: it is very noisy, and Sysmon event 22 already covers DNS queries.
 
-Алерты, которые стоит сделать сразу: **1102 / 104** (очистка журналов), **4719** (изменение аудит-политики), **SecLogging 1002** (скрипт не смог применить настройки), **Sysmon 16** (изменение конфигурации Sysmon), **4697 / 7045** (установка сервиса).
+Alerts worth creating right away:
+- **1102 / 104**: event log cleared;
+- **4719**: audit policy changed;
+- **SecLogging 1002**: the script failed to apply settings;
+- **Sysmon 16**: Sysmon configuration changed;
+- **4697 / 7045**: service installed.
 
 ---
 
-## Тесты и что проверено
+## Tests and what has been verified
 
-| Проверка | Где | Результат |
+| Check | Where | Result |
 |---|---|---|
-| Синтаксис обоих `.ps1`, PSScriptAnalyzer (Warning/Error) | pwsh 7 на Linux | чисто |
-| PS 2.0: нет конструкций PS3+ | grep + PSUseCompatibleSyntax | чисто |
-| Юнит-тесты `tests/windows-unit.ps1`: настройки, парсинг auditpol (русские имена), JSON, план размеров, проверка хешей, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логика аудита и журналов на моках auditpol/wevtutil, повторный прогон = no-op | pwsh 7 | 56/56 |
-| `tests/linux-docker.sh`: check → apply → повторный apply без изменений | Ubuntu 24.04, 20.04 (настоящий auditd); Debian 12, Rocky 9 (заглушка auditctl, зеркала пакетов недоступны из песочницы) | ок |
-| Загрузка сгенерированных правил auditd в реальное ядро | privileged-контейнер | 50/50 правил приняты |
-| Установка sysmonforlinux из packages.microsoft.com | Ubuntu 22.04 | ставится (1.5.3) |
+| Syntax of both `.ps1` files, PSScriptAnalyzer (Warning/Error) | pwsh 7 on Linux | clean |
+| PowerShell 2.0: no PS3+ constructs | grep + PSUseCompatibleSyntax | clean |
+| Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op | pwsh 7 | 56/56 |
+| `tests/linux-docker.sh`: check → apply → second apply with no changes | Ubuntu 24.04 and 20.04 with real auditd; Debian 12 and Rocky 9 with a stub auditctl (package mirrors were unreachable from the sandbox) | pass |
+| Generated auditd rules loaded into a real kernel | privileged container | 57/57 rules accepted |
+| Installing sysmonforlinux from packages.microsoft.com | Ubuntu 22.04 | installs (1.5.3) |
 
-**Не проверено (нужен реальный стенд):** весь Windows-код, который обращается к ОС (wevtutil, auditpol, установка Sysmon, реестр, DISM), `New-SecLoggingGpo.ps1` против настоящего AD/SYSVOL, работа на Server 2008/R2, запуск Sysmon for Linux на хосте с systemd (в контейнере sysmon принимает любой конфиг без проверки). Порядок проверки:
+**Not verified yet (needs a real lab):**
+- all Windows code that talks to the OS: wevtutil, auditpol, Sysmon installation, registry, DISM;
+- `New-SecLoggingGpo.ps1` against a real AD/SYSVOL;
+- behaviour on Server 2008/R2;
+- Sysmon for Linux on a host with systemd (in a container, sysmon accepts any config without validating it).
 
-1. `-AuditOnly` на WS, сервере и DC (RU и EN), прислать JSON-отчёты;
-2. apply на одном тестовом хосте каждого типа, повторный запуск должен дать `Changed=0`;
-3. `New-SecLoggingGpo.ps1 -WhatIf`, затем на тестовой OU (`-LinkTargets "OU=Test,DC=corp,DC=local"`), потом `gpresult` и `auditpol`.
+Suggested order:
+
+1. Run `-AuditOnly` on a workstation, a server and a DC (RU and EN) and collect the JSON reports.
+2. Apply on one test host of each type. A second run must report `Changed=0`.
+3. Run `New-SecLoggingGpo.ps1 -WhatIf`, then apply to a test OU (`-LinkTargets "OU=Test,DC=corp,DC=local"`), then check `gpresult` and `auditpol`.
 
 ```bash
 pwsh -NoProfile -File tests/windows-unit.ps1
-./tests/linux-docker.sh          # IMAGES="ubuntu:24.04 debian:12" для выборки
+./tests/linux-docker.sh          # IMAGES="ubuntu:24.04 debian:12" to pick images
 ```

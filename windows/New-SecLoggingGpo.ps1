@@ -1,48 +1,48 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Creates/updates the domain GPOs for security logging (run on a domain controller).
+    Створює/оновлює доменні GPO для журналювання безпеки (запускати на контролері домену).
 
 .DESCRIPTION
-    Two GPOs are created (Default Domain / Default DC policies are never touched):
+    Створюються дві GPO (Default Domain / Default DC Policy ніколи не змінюються):
 
-      SEC-Logging-Baseline           -> linked to the domain root (or -LinkTargets)
-      SEC-Logging-DomainControllers  -> linked to OU=Domain Controllers
+      SEC-Logging-Baseline           -> прив'язується до кореня домену (або -LinkTargets)
+      SEC-Logging-DomainControllers  -> прив'язується до OU=Domain Controllers
 
-    Each GPO carries:
-      * Advanced Audit Policy (audit.csv, by subcategory GUID, role-specific set)
-      * Registry policy: force subcategories, command line in 4688, PowerShell
-        ScriptBlock/Module logging (Windows PowerShell and PowerShell 7), NTLM auditing,
-        optional transcription
-      * DC GPO only: classic event log sizes/retention, NTLM domain audit,
-        LDAP interface diagnostics (2889)
-      * Computer startup script: Set-SecurityLogging.ps1 from NETLOGON
-        (enables operational channels, role-based sizes, Sysmon from the package)
+    Кожна GPO містить:
+      * Advanced Audit Policy (audit.csv, за GUID підкатегорій, набір залежно від ролі)
+      * Політики реєстру: примусові підкатегорії аудиту, командний рядок у 4688,
+        ScriptBlock/Module logging PowerShell (Windows PowerShell і PowerShell 7),
+        аудит NTLM, за бажанням Transcription
+      * Лише GPO для DC: розміри/режим класичних журналів, аудит NTLM у домені,
+        діагностика LDAP-інтерфейсу (2889)
+      * Startup-скрипт комп'ютера: Set-SecurityLogging.ps1 з NETLOGON
+        (вмикає operational-канали, розміри за роллю, Sysmon з пакета)
 
-    The offline package (Set-SecurityLogging.ps1 -BuildPackage) is staged to
-    \\<domain>\NETLOGON\SecLogging and verified by SHA256.
+    Офлайн-пакет (Set-SecurityLogging.ps1 -BuildPackage) викладається в
+    \\<домен>\NETLOGON\SecLogging і перевіряється за SHA256.
 
-    Supports -WhatIf.
+    Підтримує -WhatIf.
 
 .PARAMETER PackagePath
-    Folder with the package built by Set-SecurityLogging.ps1 -BuildPackage.
-    Default: the folder of this script.
+    Тека з пакетом, зібраним через Set-SecurityLogging.ps1 -BuildPackage.
+    За замовчуванням: тека цього скрипта.
 
 .PARAMETER LinkTargets
-    Distinguished names to link the baseline GPO to. Default: domain root.
+    Distinguished names, до яких прив'язати базову GPO. За замовчуванням: корінь домену.
 
 .PARAMETER SkipSysmon
-    Startup script runs with -SkipSysmon (logs/audit only).
+    Startup-скрипт запускається з -SkipSysmon (лише журнали/аудит).
 
 .PARAMETER UpgradeSysmon / DisablePowerShellV2 / AllowLegacySysmon
-    Passed through to the startup script.
+    Передаються в startup-скрипт.
 
 .PARAMETER TranscriptionPath
-    UNC path for PowerShell transcription (policy only; set the share ACL yourself).
+    UNC-шлях для PowerShell Transcription (лише політика; ACL шари налаштуйте самі).
 
 .PARAMETER SetDomainRootSacl
-    Add SACL entries on the domain root so 4662 is logged for DCSync
-    (replication extended rights) and for DACL/owner changes.
+    Додати записи SACL на корінь домену, щоб 4662 фіксувалася для DCSync
+    (розширені права реплікації) і для змін DACL/власника.
 
 .EXAMPLE
     .\New-SecLoggingGpo.ps1 -PackagePath D:\SecLogging -WhatIf
@@ -67,7 +67,7 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $PackagePath) { $PackagePath = $here }
 
-# Client-side extension GUID pairs: [CSE}{Tool]
+# Пари GUID клієнтських розширень (CSE): [CSE}{Tool]
 $CseRegistry = '[{35378EAC-683F-11D2-A89A-00C04FBBCFA2}{D02B1F72-3407-48AE-BA88-E8213C6761F1}]'
 $CseScripts = '[{42B5FAAE-6536-11D2-AE5A-0000F87571E3}{40B6664F-4972-11D1-A7CA-0000F87571E3}]'
 $CseAudit = '[{F3CCC681-B74C-4060-9F26-CD84525DCA2A}{0F3F3735-573D-9804-99E4-AB2A69BA5FD4}]'
@@ -81,10 +81,10 @@ $ReplicationRights = @(
 
 function Write-Step { param([string]$Text) Write-Host "==> $Text" -ForegroundColor Cyan }
 
-#region ---------------------------------------------------------------- pure helpers (unit tested)
+#region ---------------------------------------------------------------- чисті функції (покриті юніт-тестами)
 
 function Merge-GpoExtensionNames {
-    # gPCMachineExtensionNames: "[{cse}{tool}][{cse}{tool}]", sorted by CSE GUID.
+    # gPCMachineExtensionNames: "[{cse}{tool}][{cse}{tool}]", відсортовано за GUID CSE.
     param([string]$Current, [string[]]$Add)
     $set = @{}
     foreach ($m in [regex]::Matches([string]$Current, '\[[^\]]+\]')) { $set[$m.Value.ToUpper()] = $m.Value.ToUpper() }
@@ -110,7 +110,7 @@ function New-ScriptsIni {
 }
 
 function Get-EventLogPolicyValues {
-    # Admin template "Windows Components/Event Log Service": MaxSize in KB, Retention "0" = overwrite.
+    # Адмін-шаблон "Windows Components/Event Log Service": MaxSize у КБ, Retention "0" = перезаписувати.
     param($Sizes, [string]$ProfileName)
     $map = @{ Security = 'Security'; System = 'System'; Application = 'Application' }
     $out = @()
@@ -123,10 +123,10 @@ function Get-EventLogPolicyValues {
 }
 
 #endregion
-#region ---------------------------------------------------------------- AD / SYSVOL helpers
+#region ---------------------------------------------------------------- робота з AD / SYSVOL
 
 function Update-GpoFiles {
-    # Writes audit.csv + scripts.ini into the GPO folder, registers CSEs, bumps the machine version.
+    # Записує audit.csv + scripts.ini у теку GPO, реєструє CSE, підвищує версію комп'ютерної частини.
     param($Gpo, [string[]]$AuditCsv, [string[]]$ScriptsIni, [string]$DcName, [string]$DomainDns)
     $gpoPath = "\\$DcName\SYSVOL\$DomainDns\Policies\{$($Gpo.Id)}"
     $auditDir = Join-Path $gpoPath 'Machine\Microsoft\Windows NT\Audit'
@@ -134,12 +134,12 @@ function Update-GpoFiles {
     New-Item -ItemType Directory -Path $auditDir -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $scriptDir 'Startup') -Force | Out-Null
     [IO.File]::WriteAllLines((Join-Path $auditDir 'audit.csv'), [string[]]$AuditCsv, (New-Object Text.UTF8Encoding($false)))
-    # scripts.ini must be UTF-16 LE
+    # scripts.ini має бути в UTF-16 LE
     [IO.File]::WriteAllLines((Join-Path $scriptDir 'scripts.ini'), [string[]]$ScriptsIni, [Text.Encoding]::Unicode)
 
     $de = [ADSI]"LDAP://$DcName/CN={$($Gpo.Id)},CN=Policies,CN=System,$((Get-ADDomain).DistinguishedName)"
     $ext = Merge-GpoExtensionNames ([string]$de.Properties['gPCMachineExtensionNames'].Value) @($CseRegistry, $CseScripts, $CseAudit)
-    $version = [int]$de.Properties['versionNumber'].Value + 1   # low word = computer version
+    $version = [int]$de.Properties['versionNumber'].Value + 1   # молодше слово = версія комп'ютерної частини
     $de.Properties['gPCMachineExtensionNames'].Value = $ext
     $de.Properties['versionNumber'].Value = $version
     $de.CommitChanges()
@@ -163,18 +163,18 @@ function Set-GpoRegistryList {
 function Get-OrNewGpo {
     param([string]$Name, [string]$Comment, [string]$DcName)
     $g = Get-GPO -Name $Name -Server $DcName -ErrorAction SilentlyContinue
-    if ($g) { Write-Host "    exists: $Name {$($g.Id)}"; return $g }
+    if ($g) { Write-Host "    існує: $Name {$($g.Id)}"; return $g }
     $g = New-GPO -Name $Name -Comment $Comment -Server $DcName
-    Write-Host "    created: $Name {$($g.Id)}"
+    Write-Host "    створено: $Name {$($g.Id)}"
     $g
 }
 
 function Add-GpoLinkOnce {
     param([string]$GpoName, [string]$Target, [string]$DcName)
     $links = (Get-GPInheritance -Target $Target -Server $DcName).GpoLinks | ForEach-Object { $_.DisplayName }
-    if ($links -contains $GpoName) { Write-Host "    already linked: $Target"; return }
+    if ($links -contains $GpoName) { Write-Host "    вже прив'язано: $Target"; return }
     New-GPLink -Name $GpoName -Target $Target -LinkEnabled Yes -Server $DcName | Out-Null
-    Write-Host "    linked: $Target"
+    Write-Host "    прив'язано: $Target"
 }
 
 function Set-DomainRootSacl {
@@ -195,20 +195,20 @@ function Set-DomainRootSacl {
         if ($dup) { continue }
         $sd.AddAuditRule($w); $added++
     }
-    if ($added -eq 0) { Write-Host '    SACL already present'; return }
+    if ($added -eq 0) { Write-Host '    SACL уже налаштовано'; return }
     $de.psbase.CommitChanges()
-    Write-Host "    added $added audit rule(s) on $DomainDn"
+    Write-Host "    додано правил аудиту: $added на $DomainDn"
 }
 
 #endregion
-#region ---------------------------------------------------------------- main
+#region ---------------------------------------------------------------- основна частина
 
-if ($MyInvocation.InvocationName -eq '.') { return }   # dot-sourced for tests: functions only
+if ($MyInvocation.InvocationName -eq '.') { return }   # dot-source для тестів: лише функції
 
 $os = Get-CimInstance Win32_OperatingSystem
-if ($os.ProductType -ne 2) { throw 'Run this script on a domain controller.' }
+if ($os.ProductType -ne 2) { throw 'Запустіть цей скрипт на контролері домену.' }
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run elevated (Domain Admin).' }
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Запустіть з підвищеними правами (Domain Admin).' }
 Import-Module GroupPolicy, ActiveDirectory
 
 $domain = Get-ADDomain
@@ -218,13 +218,13 @@ $dcName = $env:COMPUTERNAME
 if (-not $LinkTargets) { $LinkTargets = @($domainDn) }
 $dcOu = $domain.DomainControllersContainer
 
-Write-Step "Domain $domainDns, working against DC $dcName"
+Write-Step "Домен $domainDns, працюємо з DC $dcName"
 
-# ---- 1. package
-Write-Step "Checking package $PackagePath"
+# ---- 1. пакет
+Write-Step "Перевірка пакета $PackagePath"
 $mainScript = Join-Path $PackagePath 'Set-SecurityLogging.ps1'
 if (-not (Test-Path -LiteralPath $mainScript)) { $mainScript = Join-Path $here 'Set-SecurityLogging.ps1' }
-if (-not (Test-Path -LiteralPath $mainScript)) { throw "Set-SecurityLogging.ps1 not found in $PackagePath" }
+if (-not (Test-Path -LiteralPath $mainScript)) { throw "Set-SecurityLogging.ps1 не знайдено в $PackagePath" }
 $settings = & $mainScript -ExportSettings
 $pins = @{}
 $iniPath = Join-Path $PackagePath 'sources.ini'
@@ -240,30 +240,30 @@ foreach ($f in @(
         @{ Rel = 'legacy\sysmonconfig-export.xml'; Pin = $settings.Pins.LegacyConfigSha256 })) {
     $src = Join-Path $PackagePath $f.Rel
     if (-not (Test-Path -LiteralPath $src)) {
-        if (-not $SkipSysmon -and $f.Rel -notlike 'legacy*') { throw "$($f.Rel) missing in package. Build it: Set-SecurityLogging.ps1 -BuildPackage $PackagePath" }
-        Write-Host "    skip (absent): $($f.Rel)"; continue
+        if (-not $SkipSysmon -and $f.Rel -notlike 'legacy*') { throw "$($f.Rel) відсутній у пакеті. Зберіть його: Set-SecurityLogging.ps1 -BuildPackage $PackagePath" }
+        Write-Host "    пропущено (відсутній): $($f.Rel)"; continue
     }
     $h = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash.ToLower()
-    if ($f.Pin -and $h -ne $f.Pin.ToLower()) { throw "$($f.Rel): SHA256 $h does not match pin $($f.Pin)" }
-    if (-not $f.Pin) { throw "$($f.Rel): no pinned SHA256 in sources.ini - rebuild the package with -BuildPackage" }
+    if ($f.Pin -and $h -ne $f.Pin.ToLower()) { throw "$($f.Rel): SHA256 $h не збігається із закріпленим $($f.Pin)" }
+    if (-not $f.Pin) { throw "$($f.Rel): у sources.ini немає закріпленого SHA256 - перезберіть пакет через -BuildPackage" }
     Write-Host "    OK $($f.Rel) $h"
     $files += @{ Rel = $f.Rel; Pin = $h; Src = $src }
 }
 
 $share = "\\$domainDns\NETLOGON\SecLogging"
 $localShare = "\\$dcName\NETLOGON\SecLogging"
-Write-Step "Staging package to $localShare (replicates to all DCs via SYSVOL)"
-if ($PSCmdlet.ShouldProcess($localShare, 'Copy package')) {
+Write-Step "Викладаємо пакет у $localShare (реплікується на всі DC через SYSVOL)"
+if ($PSCmdlet.ShouldProcess($localShare, 'Копіювання пакета')) {
     foreach ($f in $files) {
         $dst = Join-Path $localShare $f.Rel
         New-Item -ItemType Directory -Path (Split-Path -Parent $dst) -Force | Out-Null
         Copy-Item -LiteralPath $f.Src -Destination $dst -Force
-        if ($f.Pin -and (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash.ToLower() -ne $f.Pin) { throw "Copy verification failed: $dst" }
+        if ($f.Pin -and (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash.ToLower() -ne $f.Pin) { throw "Перевірка копії не пройдена: $dst" }
     }
-    Write-Host '    copied and verified'
+    Write-Host '    скопійовано й перевірено'
 }
 
-# ---- 2. startup script command line
+# ---- 2. командний рядок startup-скрипта
 $startupArgs = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$share\Set-SecurityLogging.ps1`" -SourcePath `"$share`" -Quiet"
 if ($SkipSysmon) { $startupArgs += ' -SkipSysmon' }
 if ($UpgradeSysmon) { $startupArgs += ' -UpgradeSysmon' }
@@ -272,7 +272,7 @@ if ($AllowLegacySysmon) { $startupArgs += ' -AllowLegacySysmon' }
 if ($TranscriptionPath) { $startupArgs += " -TranscriptionPath `"$TranscriptionPath`"" }
 $scriptsIni = New-ScriptsIni 'powershell.exe' $startupArgs
 
-# ---- 3. registry policy lists
+# ---- 3. списки політик реєстру
 function ConvertTo-GpoRegistry {
     param($Items)
     $out = @()
@@ -294,35 +294,35 @@ $dcRegistry = @($common) + @($dcOnly) + @(Get-EventLogPolicyValues $settings.Siz
 
 # ---- 4. GPOs
 foreach ($g in @(
-        @{ Name = $BaselineGpoName; Role = 'Workstation'; Registry = $common; Links = $LinkTargets; Comment = 'Security logging baseline: audit policy, PowerShell/NTLM logging, Sysmon startup script. Managed by New-SecLoggingGpo.ps1' }
-        @{ Name = $DcGpoName; Role = 'DomainController'; Registry = $dcRegistry; Links = @($dcOu); Comment = 'Security logging for domain controllers: DC audit policy, log sizes, NTLM/LDAP auditing. Managed by New-SecLoggingGpo.ps1' })) {
+        @{ Name = $BaselineGpoName; Role = 'Workstation'; Registry = $common; Links = $LinkTargets; Comment = 'Базове журналювання безпеки: політика аудиту, журналювання PowerShell/NTLM, startup-скрипт Sysmon. Керується New-SecLoggingGpo.ps1' }
+        @{ Name = $DcGpoName; Role = 'DomainController'; Registry = $dcRegistry; Links = @($dcOu); Comment = 'Журналювання безпеки для контролерів домену: аудит DC, розміри журналів, аудит NTLM/LDAP. Керується New-SecLoggingGpo.ps1' })) {
     Write-Step "GPO $($g.Name)"
-    if (-not $PSCmdlet.ShouldProcess($g.Name, 'Create/update GPO, registry policy, audit.csv, startup script, links')) { continue }
+    if (-not $PSCmdlet.ShouldProcess($g.Name, 'Створення/оновлення GPO, політик реєстру, audit.csv, startup-скрипта, прив''язок')) { continue }
     $gpo = Get-OrNewGpo $g.Name $g.Comment $dcName
     Set-GpoRegistryList $g.Name $g.Registry $dcName
-    # Baseline audit.csv uses the workstation set (member servers get the same; File Share differs only slightly).
-    # The DC GPO carries the complete DC set, so the result is correct whether or not audit.csv files merge.
+    # Базовий audit.csv використовує набір робочої станції (рядові сервери отримують той самий; відрізняється лише File Share).
+    # GPO для DC містить повний набір DC, тож результат коректний незалежно від того, чи об'єднуються файли audit.csv.
     $csv = New-AuditCsv $settings.AuditPolicy $g.Role
     Update-GpoFiles -Gpo $gpo -AuditCsv $csv -ScriptsIni $scriptsIni -DcName $dcName -DomainDns $domainDns
-    Write-Host "    audit.csv: $($csv.Count - 1) subcategories; startup script set"
+    Write-Host "    audit.csv: підкатегорій $($csv.Count - 1); startup-скрипт налаштовано"
     foreach ($t in $g.Links) { Add-GpoLinkOnce $g.Name $t $dcName }
 }
 
-# ---- 5. SACL for DCSync / ACL abuse
+# ---- 5. SACL для DCSync / зловживань ACL
 if ($SetDomainRootSacl) {
-    Write-Step "SACL on $domainDn (4662 for replication rights, WriteDacl/WriteOwner)"
-    if ($PSCmdlet.ShouldProcess($domainDn, 'Add audit rules')) { Set-DomainRootSacl $domainDn $dcName }
+    Write-Step "SACL на $domainDn (4662 для прав реплікації, WriteDacl/WriteOwner)"
+    if ($PSCmdlet.ShouldProcess($domainDn, 'Додавання правил аудиту')) { Set-DomainRootSacl $domainDn $dcName }
 }
 else {
     Write-Host ''
-    Write-Host 'Note: without -SetDomainRootSacl event 4662 for DCSync may not be generated.' -ForegroundColor Yellow
+    Write-Host 'Примітка: без -SetDomainRootSacl подія 4662 для DCSync може не генеруватися.' -ForegroundColor Yellow
 }
 
 Write-Host ''
-Write-Host 'Done. Verify on a client / DC:' -ForegroundColor Green
+Write-Host 'Готово. Перевірте на клієнті / DC:' -ForegroundColor Green
 Write-Host '  gpupdate /force'
-Write-Host '  gpresult /h C:\gp.html            (both SEC-Logging GPOs applied?)'
+Write-Host '  gpresult /h C:\gp.html            (обидві SEC-Logging GPO застосовано?)'
 Write-Host '  auditpol /get /category:*'
-Write-Host '  after reboot: type C:\ProgramData\SecLogging\last-report.json'
+Write-Host '  після перезавантаження: type C:\ProgramData\SecLogging\last-report.json'
 
 #endregion

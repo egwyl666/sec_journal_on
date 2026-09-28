@@ -1,81 +1,82 @@
-#Requires -Version 2.0
+﻿#Requires -Version 2.0
 <#
 .SYNOPSIS
-    Detects the host role, checks and enables security/telemetry event logs,
-    Advanced Audit Policy, PowerShell logging, NTLM auditing and Sysmon.
+    Визначає роль хоста, перевіряє та вмикає журнали безпеки й телеметрії,
+    Advanced Audit Policy, журналювання PowerShell, аудит NTLM і Sysmon.
 
 .DESCRIPTION
-    Pipeline: detect host -> read current state -> apply only what is missing
-    -> re-read and verify -> write a report (console + JSON + Application log).
+    Порядок роботи: визначення хоста -> читання поточного стану -> застосування
+    лише того, чого бракує -> повторне читання й перевірка -> звіт
+    (консоль + JSON + подія в журналі Application).
 
-    Compatible with Windows PowerShell 2.0 (Windows Server 2008 / 2008 R2)
-    up to Windows 11 / Server 2025. Every value is "raise only": log sizes and
-    audit settings that are already stricter/larger on the host are kept.
+    Сумісний з Windows PowerShell 2.0 (Windows Server 2008 / 2008 R2)
+    і до Windows 11 / Server 2025. Усі значення лише підвищуються: розміри
+    журналів і налаштування аудиту, які на хості вже більші/суворіші, залишаються.
 
-    Sysmon sources (one of three installation modes):
-      1. Online      - no -SourcePath: Sysmon.zip from download.sysinternals.com,
-                       config from SwiftOnSecurity (pinned commit), SHA256-checked.
-      2. Offline     - -SourcePath <folder|UNC> with a package made by -BuildPackage.
-      3. GPO         - New-SecLoggingGpo.ps1 stages the package into NETLOGON and
-                       runs this script as a computer startup script (mode 2).
+    Джерела Sysmon (один із трьох способів встановлення):
+      1. Online  - без -SourcePath: Sysmon.zip з download.sysinternals.com,
+                   конфіг SwiftOnSecurity (закріплений коміт), перевірка SHA256.
+      2. Offline - -SourcePath <тека|UNC> з пакетом, зібраним через -BuildPackage.
+      3. GPO     - New-SecLoggingGpo.ps1 викладає пакет у NETLOGON і запускає
+                   цей скрипт як startup-скрипт комп'ютера (спосіб 2).
 
 .PARAMETER AuditOnly
-    Only report current state and what would change. Nothing is modified.
+    Лише показати поточний стан і що буде змінено. Нічого не змінює.
 
 .PARAMETER SourcePath
-    Folder or UNC path of an offline package (built with -BuildPackage).
+    Тека або UNC-шлях до офлайн-пакета (зібраного через -BuildPackage).
 
 .PARAMETER Online
-    With -SourcePath: fall back to downloading files missing in the package.
+    Разом із -SourcePath: докачати з інтернету файли, яких немає в пакеті.
 
 .PARAMETER Role
-    Override detected role: Workstation, Server, DomainController.
+    Перевизначити визначену роль: Workstation, Server, DomainController.
 
 .PARAMETER SkipSysmon
-    Do not install/configure Sysmon.
+    Не встановлювати й не налаштовувати Sysmon.
 
 .PARAMETER UpgradeSysmon
-    Upgrade an installed Sysmon older than the package version (uninstall + install).
+    Оновити встановлений Sysmon, старіший за версію з пакета (видалення + встановлення).
 
 .PARAMETER AllowUnpinnedSysmon
-    Accept Sysmon.zip without a pinned SHA256 (only a valid Microsoft Authenticode
-    signature is required). Use only when you cannot pin the hash.
+    Прийняти Sysmon.zip без закріпленого SHA256 (перевіряється лише дійсний
+    підпис Microsoft Authenticode). Використовуйте, лише якщо хеш закріпити неможливо.
 
 .PARAMETER AllowLegacySysmon
-    Allow Sysmon installation on Windows 7 / Server 2008 / 2008 R2 (NT 6.0/6.1).
-    Requires legacy\Sysmon.zip (Sysmon 10.42) in the package. Test on one host first.
+    Дозволити встановлення Sysmon на Windows 7 / Server 2008 / 2008 R2 (NT 6.0/6.1).
+    Потрібен legacy\Sysmon.zip (Sysmon 10.42) у пакеті. Спершу перевірте на одному хості.
 
 .PARAMETER DisablePowerShellV2
-    Remove the PowerShell 2.0 engine optional feature (Windows 8 / 2012 and newer).
+    Видалити компонент рушія PowerShell 2.0 (Windows 8 / 2012 і новіші).
 
 .PARAMETER TranscriptionPath
-    Enable PowerShell transcription into this folder (local path gets a write-only ACL).
+    Увімкнути PowerShell Transcription у цю теку (локальна тека отримує ACL лише на запис).
 
 .PARAMETER ConfigureWazuh
-    Add missing eventchannel <localfile> entries to the local Wazuh agent ossec.conf.
+    Додати відсутні записи eventchannel <localfile> в ossec.conf локального агента Wazuh.
 
 .PARAMETER SkipAuditPolicy
-    Do not touch Advanced Audit Policy.
+    Не змінювати Advanced Audit Policy.
 
 .PARAMETER ReportPath
-    JSON report path. Default: %ProgramData%\SecLogging\report-<timestamp>.json
+    Шлях до JSON-звіту. За замовчуванням: %ProgramData%\SecLogging\report-<час>.json
 
 .PARAMETER Quiet
-    Print only the summary (for GPO startup runs).
+    Виводити лише підсумок (для запуску як startup-скрипт GPO).
 
 .PARAMETER BuildPackage
-    Build an offline package into this folder (needs internet): downloads Sysmon and
-    configs, verifies signatures/hashes, copies this script, writes sources.ini.
+    Зібрати офлайн-пакет у цю теку (потрібен інтернет): завантажує Sysmon і конфіги,
+    перевіряє підписи/хеші, копіює цей скрипт, записує sources.ini.
 
 .PARAMETER LegacySysmonZip
-    With -BuildPackage: path to a Sysmon 10.42 Sysmon.zip for legacy hosts.
+    Разом із -BuildPackage: шлях до Sysmon.zip версії 10.42 для старих хостів.
 
 .PARAMETER AcceptNewSysmon
-    With -BuildPackage: accept a Sysmon.zip whose hash differs from the pinned one
-    (new Microsoft release). The signature is still verified.
+    Разом із -BuildPackage: прийняти Sysmon.zip, хеш якого відрізняється від
+    закріпленого (новий реліз Microsoft). Підпис усе одно перевіряється.
 
 .PARAMETER ExportSettings
-    Return the settings hashtable (used by New-SecLoggingGpo.ps1).
+    Повернути таблицю налаштувань (використовує New-SecLoggingGpo.ps1).
 
 .EXAMPLE
     .\Set-SecurityLogging.ps1 -AuditOnly
@@ -114,8 +115,8 @@ $ScriptDir = Split-Path -Parent $ScriptPath
 $StateRegPath = 'SOFTWARE\SecLogging'
 $WorkDir = Join-Path $env:ProgramData 'SecLogging'
 
-# Pinned sources. sources.ini next to the script (written by -BuildPackage) overrides these.
-# SysmonZipSha256 changes with every Sysmon release: fill it via -BuildPackage.
+# Закріплені джерела. sources.ini поруч зі скриптом (його пише -BuildPackage) перевизначає ці значення.
+# SysmonZipSha256 змінюється з кожним релізом Sysmon: заповнюється через -BuildPackage.
 $DefaultPins = @{
     SysmonZipUrl          = 'https://download.sysinternals.com/files/Sysmon.zip'
     SysmonZipSha256       = ''
@@ -128,12 +129,12 @@ $DefaultPins = @{
     LegacyConfigSha256    = 'bf7800825bd025d77fc0af6985f6a08fb201048a772f3085564351b5a0b66e3f'
 }
 
-#region ---------------------------------------------------------------- settings
+#region ---------------------------------------------------------------- налаштування
 
 function New-OD { New-Object System.Collections.Specialized.OrderedDictionary }
 
 function Get-SecLoggingSettings {
-    # Log sizes in MB per profile and log class. Classic logs top out around 4 GB.
+    # Розміри журналів у МБ за профілем і класом журналу. Класичні журнали - до ~4 ГБ.
     $sizes = @{
         DomainController = @{ Security = 3072; Sysmon = 1536; PowerShell = 1024; System = 384; Application = 256; DirSvc = 512; Other = 192 }
         Server           = @{ Security = 1536; Sysmon = 1024; PowerShell = 768;  System = 256; Application = 256; DirSvc = 256; Other = 192 }
@@ -141,7 +142,7 @@ function Get-SecLoggingSettings {
         Minimal          = @{ Security = 256;  Sysmon = 256;  PowerShell = 128;  System = 64;  Application = 64;  DirSvc = 128; Other = 32 }
     }
 
-    # N = channel, C = size class, DC = only on domain controllers, NoWazuh = keep local only
+    # N = канал, C = клас розміру, DC = лише на контролерах домену, NoWazuh = лише локально (не слати у Wazuh)
     $channels = @(
         @{ N = 'Security'; C = 'Security' }
         @{ N = 'System'; C = 'System' }
@@ -181,11 +182,10 @@ function Get-SecLoggingSettings {
         @{ N = 'DFS Replication'; C = 'Other'; DC = $true }
     )
 
-    # Advanced Audit Policy by subcategory GUID (locale independent).
-    # Values: 0 = not managed, 1 = Success, 2 = Failure, 3 = Success and Failure.
-    # W = workstation, S = member server, D = domain controller.
+    # Advanced Audit Policy за GUID підкатегорії (не залежить від мови ОС).
+    # Значення: 0 = не керуємо, 1 = Успіх, 2 = Відмова, 3 = Успіх і відмова.
     $audit = @()
-    # Name|GUID suffix|Workstation|Server|DC
+    # Назва|суфікс GUID|Робоча станція|Сервер|DC
     $auditTable = @(
         # --- Account Logon
         'Credential Validation|923F|3|3|3'
@@ -201,7 +201,7 @@ function Get-SecLoggingSettings {
         'Process Creation|922B|1|1|1'
         'DPAPI Activity|922D|3|3|3'
         'Plug and Play Events|9248|1|1|1'
-        # --- DS Access (DC only)
+        # --- DS Access (лише DC)
         'Directory Service Access|923B|0|0|3'
         'Directory Service Changes|923C|0|0|1'
         # --- Logon/Logoff
@@ -211,7 +211,7 @@ function Get-SecLoggingSettings {
         'Special Logon|921B|1|1|1'
         'Other Logon/Logoff Events|921C|3|3|3'
         'Group Membership|9249|1|1|1'
-        # --- Object Access (targeted, low noise)
+        # --- Object Access (точково, мало шуму)
         'File Share|9224|3|1|3'
         'Detailed File Share|9244|2|2|2'
         'Removable Storage|9245|3|3|3'
@@ -235,29 +235,29 @@ function Get-SecLoggingSettings {
         $audit += @{ Name = $a[0]; Guid = ('0CCE{0}-69AE-11D9-BED3-505054503030' -f $a[1]); Workstation = [int]$a[2]; Server = [int]$a[3]; DomainController = [int]$a[4] }
     }
 
-    # Registry settings. Mode Min = raise a DWORD to at least Value; Exact = set as is.
+    # Параметри реєстру. Mode Min = підняти DWORD щонайменше до Value; Exact = встановити як є.
     $pol = 'SOFTWARE\Policies\Microsoft\Windows\PowerShell'
     $core = 'SOFTWARE\Policies\Microsoft\PowerShellCore'
     $registry = @(
-        @{ Path = 'SYSTEM\CurrentControlSet\Control\Lsa'; Name = 'SCENoApplyLegacyAuditPolicy'; Type = 'DWord'; Value = 1; Mode = 'Min'; DC = $false; Why = 'Force advanced audit subcategories' }
-        @{ Path = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit'; Name = 'ProcessCreationIncludeCmdLine_Enabled'; Type = 'DWord'; Value = 1; Mode = 'Min'; DC = $false; Why = 'Command line in 4688' }
+        @{ Path = 'SYSTEM\CurrentControlSet\Control\Lsa'; Name = 'SCENoApplyLegacyAuditPolicy'; Type = 'DWord'; Value = 1; Mode = 'Min'; DC = $false; Why = 'Примусово застосовувати підкатегорії аудиту' }
+        @{ Path = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit'; Name = 'ProcessCreationIncludeCmdLine_Enabled'; Type = 'DWord'; Value = 1; Mode = 'Min'; DC = $false; Why = 'Командний рядок у 4688' }
         @{ Path = "$pol\ScriptBlockLogging"; Name = 'EnableScriptBlockLogging'; Type = 'DWord'; Value = 1; Mode = 'Min'; DC = $false; Why = 'PowerShell 4104' }
         @{ Path = "$pol\ModuleLogging"; Name = 'EnableModuleLogging'; Type = 'DWord'; Value = 1; Mode = 'Min'; DC = $false; Why = 'PowerShell 4103' }
-        @{ Path = "$pol\ModuleLogging\ModuleNames"; Name = '*'; Type = 'String'; Value = '*'; Mode = 'Exact'; DC = $false; Why = 'Module logging for all modules' }
+        @{ Path = "$pol\ModuleLogging\ModuleNames"; Name = '*'; Type = 'String'; Value = '*'; Mode = 'Exact'; DC = $false; Why = 'Module logging для всіх модулів' }
         @{ Path = "$core\ScriptBlockLogging"; Name = 'EnableScriptBlockLogging'; Type = 'DWord'; Value = 1; Mode = 'Min'; DC = $false; Why = 'PowerShell 7 4104' }
         @{ Path = "$core\ModuleLogging"; Name = 'EnableModuleLogging'; Type = 'DWord'; Value = 1; Mode = 'Min'; DC = $false; Why = 'PowerShell 7 4103' }
-        @{ Path = "$core\ModuleLogging\ModuleNames"; Name = '*'; Type = 'String'; Value = '*'; Mode = 'Exact'; DC = $false; Why = 'PowerShell 7 module logging' }
-        @{ Path = 'SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0'; Name = 'AuditReceivingNTLMTraffic'; Type = 'DWord'; Value = 2; Mode = 'Min'; DC = $false; Why = 'Audit incoming NTLM (8001-8003)' }
-        @{ Path = 'SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0'; Name = 'RestrictSendingNTLMTraffic'; Type = 'DWord'; Value = 1; Mode = 'Min'; DC = $false; Why = 'Audit outgoing NTLM (8001)' }
-        @{ Path = 'SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'; Name = 'AuditNTLMInDomain'; Type = 'DWord'; Value = 7; Mode = 'Min'; DC = $true; Why = 'Audit NTLM in domain (8004)' }
-        @{ Path = 'SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics'; Name = '16 LDAP Interface Events'; Type = 'DWord'; Value = 2; Mode = 'Min'; DC = $true; Why = 'LDAP unsigned/simple bind (2889)' }
+        @{ Path = "$core\ModuleLogging\ModuleNames"; Name = '*'; Type = 'String'; Value = '*'; Mode = 'Exact'; DC = $false; Why = 'Module logging для PowerShell 7' }
+        @{ Path = 'SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0'; Name = 'AuditReceivingNTLMTraffic'; Type = 'DWord'; Value = 2; Mode = 'Min'; DC = $false; Why = 'Аудит вхідного NTLM (8001-8003)' }
+        @{ Path = 'SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0'; Name = 'RestrictSendingNTLMTraffic'; Type = 'DWord'; Value = 1; Mode = 'Min'; DC = $false; Why = 'Аудит вихідного NTLM (8001)' }
+        @{ Path = 'SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'; Name = 'AuditNTLMInDomain'; Type = 'DWord'; Value = 7; Mode = 'Min'; DC = $true; Why = 'Аудит NTLM у домені (8004)' }
+        @{ Path = 'SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics'; Name = '16 LDAP Interface Events'; Type = 'DWord'; Value = 2; Mode = 'Min'; DC = $true; Why = 'LDAP без підпису / simple bind (2889)' }
     )
 
     @{ Sizes = $sizes; Channels = $channels; AuditPolicy = $audit; Registry = $registry; Pins = $DefaultPins; ScriptVersion = $ScriptVersion }
 }
 
 #endregion
-#region ---------------------------------------------------------------- report
+#region ---------------------------------------------------------------- звіт
 
 $Script:Report = @()
 $Script:Counts = @{ OK = 0; Changed = 0; WouldChange = 0; Warning = 0; Error = 0; Skipped = 0 }
@@ -321,7 +321,7 @@ function ConvertTo-JsonString {
 }
 
 #endregion
-#region ---------------------------------------------------------------- helpers
+#region ---------------------------------------------------------------- допоміжні функції
 
 function Test-IsAdmin {
     $p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -382,9 +382,9 @@ function Set-RegValue {
 }
 
 function Invoke-Native {
-    # Runs an external program, returns @{ Code; Output }
+    # Запускає зовнішню програму, повертає @{ Code; Output }
     param([string]$FilePath, [string[]]$Arguments)
-    # stderr of native tools must not become a terminating error under ErrorActionPreference=Stop
+    # stderr зовнішніх утиліт не повинен ставати фатальною помилкою при ErrorActionPreference=Stop
     $ErrorActionPreference = 'Continue'
     $out = & $FilePath @Arguments 2>&1 | ForEach-Object { [string]$_ }
     @{ Code = $LASTEXITCODE; Output = (($out | Where-Object { $_ -ne '' }) -join "`n") }
@@ -393,10 +393,10 @@ function Invoke-Native {
 function Save-Download {
     param([string]$Url, [string]$Destination)
     try {
-        # TLS 1.2 (3072) is not in the enum on .NET 3.5, hence the numeric value.
+        # TLS 1.2 (3072) відсутній у enum на .NET 3.5, тому числове значення.
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
     }
-    catch { Write-Verbose 'TLS 1.2 is not available in this .NET version' }
+    catch { Write-Verbose 'TLS 1.2 недоступний у цій версії .NET' }
     $wc = New-Object System.Net.WebClient
     $wc.Proxy = [System.Net.WebRequest]::GetSystemWebProxy()
     $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
@@ -414,10 +414,10 @@ function Expand-ZipFile {
         [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
     }
     catch {
-        # .NET < 4.5 (Server 2008 / 2008 R2): Shell zip folder
+        # .NET < 4.5 (Server 2008 / 2008 R2): zip через Shell
         $shell = New-Object -ComObject Shell.Application
         $zip = $shell.NameSpace($ZipPath)
-        if (-not $zip) { throw "Cannot open zip $ZipPath (no .NET 4.5 and no Shell zip support)" }
+        if (-not $zip) { throw "Не вдалося відкрити zip $ZipPath (немає .NET 4.5 і підтримки zip у Shell)" }
         $shell.NameSpace($Destination).CopyHere($zip.Items(), 0x14)
     }
 }
@@ -431,7 +431,7 @@ function Test-MicrosoftSignature {
 }
 
 #endregion
-#region ---------------------------------------------------------------- detection
+#region ---------------------------------------------------------------- визначення хоста
 
 function Get-HostInfo {
     $os = Get-WmiObject Win32_OperatingSystem
@@ -460,7 +460,7 @@ function Get-HostInfo {
 }
 
 #endregion
-#region ---------------------------------------------------------------- event log channels
+#region ---------------------------------------------------------------- канали журналів подій
 
 [void][Reflection.Assembly]::LoadWithPartialName('System.Core')
 
@@ -481,7 +481,7 @@ function Get-ChannelState {
 }
 
 function Get-ChannelPolicy {
-    # GPO "Event Log Service" admin template only covers the four classic logs.
+    # Адмін-шаблон GPO "Event Log Service" охоплює лише чотири класичні журнали.
     param([string]$Name)
     if (@('Application', 'Security', 'System', 'Setup') -notcontains $Name) { return $null }
     $path = "SOFTWARE\Policies\Microsoft\Windows\EventLog\$Name"
@@ -495,7 +495,7 @@ function Get-ChannelPolicy {
 }
 
 function Get-SizePlan {
-    # Returns profile name whose growth fits in 50% of free space, stepping down if needed.
+    # Повертає профіль, приріст якого вміщується в 50% вільного місця; за потреби знижує профіль.
     param([string]$RoleName, $States, $Settings, [long]$FreeMB)
     $chain = @{ DomainController = @('DomainController', 'Server', 'Workstation', 'Minimal'); Server = @('Server', 'Workstation', 'Minimal'); Workstation = @('Workstation', 'Minimal') }[$RoleName]
     foreach ($p in $chain) {
@@ -519,18 +519,18 @@ function Invoke-Channels {
     }
     $plan = Get-SizePlan $RoleName $states $Settings $HostInfo.SystemDriveFreeMB
     if (-not $plan.Profile) {
-        Add-Result 'EventLog' 'Size profile' 'Warning' ("Not enough free space on {0} ({1} MB free): sizes are not increased, only enable/retention." -f $env:SystemDrive, $HostInfo.SystemDriveFreeMB)
+        Add-Result 'EventLog' 'Профіль розмірів' 'Warning' ("Недостатньо вільного місця на {0} (вільно {1} МБ): розміри не збільшуються, лише ввімкнення/режим перезапису." -f $env:SystemDrive, $HostInfo.SystemDriveFreeMB)
     }
     elseif ($plan.Profile -ne $RoleName) {
-        Add-Result 'EventLog' 'Size profile' 'Warning' ("Profile '{0}' does not fit free space, using '{1}' (+{2} MB)" -f $RoleName, $plan.Profile, $plan.GrowthMB)
+        Add-Result 'EventLog' 'Профіль розмірів' 'Warning' ("Профіль '{0}' не вміщується у вільне місце, використовується '{1}' (+{2} МБ)" -f $RoleName, $plan.Profile, $plan.GrowthMB)
     }
     else {
-        Add-Result 'EventLog' 'Size profile' 'OK' ("{0} (+{1} MB growth, {2} MB free)" -f $plan.Profile, $plan.GrowthMB, $HostInfo.SystemDriveFreeMB)
+        Add-Result 'EventLog' 'Профіль розмірів' 'OK' ("{0} (приріст +{1} МБ, вільно {2} МБ)" -f $plan.Profile, $plan.GrowthMB, $HostInfo.SystemDriveFreeMB)
     }
 
     foreach ($s in $states) {
         $name = $s.Name; $st = $s.State
-        if (-not $st.Exists) { Add-Result 'EventLog' $name 'Skipped' 'Channel not present on this host'; continue }
+        if (-not $st.Exists) { Add-Result 'EventLog' $name 'Skipped' 'Каналу немає на цьому хості'; continue }
 
         $wantBytes = $st.MaxBytes
         if ($plan.Profile) { $wantBytes = [long]$Settings.Sizes[$plan.Profile][$s.Class] * 1MB }
@@ -538,24 +538,24 @@ function Invoke-Channels {
         $notes = @()
         if ($policy) {
             if ($null -ne $policy.MaxBytes -and $policy.MaxBytes -lt $wantBytes) {
-                $notes += ('GPO limits size to {0} MB (want {1} MB) - change the GPO' -f [long]($policy.MaxBytes / 1MB), [long]($wantBytes / 1MB))
+                $notes += ('GPO обмежує розмір до {0} МБ (потрібно {1} МБ) - змініть GPO' -f [long]($policy.MaxBytes / 1MB), [long]($wantBytes / 1MB))
                 $wantBytes = $st.MaxBytes
             }
-            if ($null -ne $policy.Retention -and [string]$policy.Retention -ne '0') { $notes += "GPO Retention='$($policy.Retention)' (not overwrite-as-needed)" }
-            if ($null -ne $policy.AutoBackup -and [string]$policy.AutoBackup -ne '0') { $notes += 'GPO AutoBackupLogFiles is on' }
+            if ($null -ne $policy.Retention -and [string]$policy.Retention -ne '0') { $notes += "GPO Retention='$($policy.Retention)' (не 'перезаписувати за потреби')" }
+            if ($null -ne $policy.AutoBackup -and [string]$policy.AutoBackup -ne '0') { $notes += 'У GPO увімкнено AutoBackupLogFiles' }
         }
 
         $needEnable = -not $st.Enabled
         $needSize = $wantBytes -gt $st.MaxBytes
         $needMode = $st.Mode -ne 'Circular'
-        $before = '{0}; {1} MB; {2}' -f $(if ($st.Enabled) { 'enabled' } else { 'disabled' }), [long]($st.MaxBytes / 1MB), $st.Mode
+        $before = '{0}; {1} МБ; {2}' -f $(if ($st.Enabled) { 'увімкнено' } else { 'вимкнено' }), [long]($st.MaxBytes / 1MB), $st.Mode
 
         if (-not ($needEnable -or $needSize -or $needMode)) {
             if ($notes.Count) { Add-Result 'EventLog' $name 'Warning' ($notes -join '; ') $before $before }
             else { Add-Result 'EventLog' $name 'OK' $before $before $before }
             continue
         }
-        $target = '{0}; {1} MB; Circular' -f 'enabled', [long]([math]::Max($wantBytes, $st.MaxBytes) / 1MB)
+        $target = '{0}; {1} МБ; Circular' -f 'увімкнено', [long]([math]::Max($wantBytes, $st.MaxBytes) / 1MB)
         if ($AuditOnly) { Add-Result 'EventLog' $name 'WouldChange' ((@("-> $target") + $notes) -join '; ') $before $target; continue }
 
         $wargs = @('sl', $name)
@@ -564,23 +564,23 @@ function Invoke-Channels {
         if ($needSize) { $wargs += ('/ms:{0}' -f $wantBytes) }
         $r = Invoke-Native 'wevtutil.exe' $wargs
         $after = Get-ChannelState $name
-        $afterText = '{0}; {1} MB; {2}' -f $(if ($after.Enabled) { 'enabled' } else { 'disabled' }), [long]($after.MaxBytes / 1MB), $after.Mode
+        $afterText = '{0}; {1} МБ; {2}' -f $(if ($after.Enabled) { 'увімкнено' } else { 'вимкнено' }), [long]($after.MaxBytes / 1MB), $after.Mode
         $ok = $after.Enabled -and $after.Mode -eq 'Circular' -and $after.MaxBytes -ge $wantBytes
         if ($r.Code -eq 0 -and $ok) {
             $status = 'Changed'; if ($notes.Count) { $status = 'Warning' }
             Add-Result 'EventLog' $name $status ((@("$before -> $afterText") + $notes) -join '; ') $before $afterText
         }
         else {
-            Add-Result 'EventLog' $name 'Error' ("wevtutil exit {0}: {1}; now: {2}" -f $r.Code, $r.Output, $afterText) $before $afterText
+            Add-Result 'EventLog' $name 'Error' ("wevtutil код {0}: {1}; зараз: {2}" -f $r.Code, $r.Output, $afterText) $before $afterText
         }
     }
 }
 
 #endregion
-#region ---------------------------------------------------------------- audit policy
+#region ---------------------------------------------------------------- політика аудиту
 
 function ConvertFrom-AuditCsv {
-    # Parses auditpol /backup or GPO audit.csv; returns @{ GUID(upper) = SettingValue }
+    # Розбирає auditpol /backup або audit.csv з GPO; повертає @{ GUID(верхній регістр) = SettingValue }
     param([string[]]$Lines)
     $map = @{}
     foreach ($l in $Lines) {
@@ -595,14 +595,14 @@ function ConvertFrom-AuditCsv {
 function Get-AuditPolicyMap {
     $tmp = Join-Path $env:TEMP ('auditpol-{0}.csv' -f [guid]::NewGuid())
     $r = Invoke-Native 'auditpol.exe' @('/backup', "/file:$tmp")
-    if ($r.Code -ne 0) { throw "auditpol /backup failed: $($r.Output)" }
+    if ($r.Code -ne 0) { throw "auditpol /backup завершився помилкою: $($r.Output)" }
     try { return (ConvertFrom-AuditCsv (Get-Content -LiteralPath $tmp)) }
     finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
 }
 
 function Format-AuditValue {
     param([int]$V)
-    @('No Auditing', 'Success', 'Failure', 'Success and Failure')[$V]
+    @('Без аудиту', 'Успіх', 'Відмова', 'Успіх і відмова')[$V]
 }
 
 function Invoke-AuditPolicy {
@@ -611,7 +611,7 @@ function Invoke-AuditPolicy {
     $gpoFile = Join-Path $env:SystemRoot 'security\audit\audit.csv'
     $gpo = @{}
     if (Test-Path -LiteralPath $gpoFile) { $gpo = ConvertFrom-AuditCsv (Get-Content -LiteralPath $gpoFile) }
-    if ($gpo.Count) { Add-Result 'AuditPolicy' 'GPO' 'OK' ("Advanced audit policy is delivered by GPO ({0} subcategories); local changes may be overwritten at GPO refresh" -f $gpo.Count) }
+    if ($gpo.Count) { Add-Result 'AuditPolicy' 'GPO' 'OK' ("Advanced Audit Policy надходить із GPO ({0} підкатегорій); локальні зміни можуть бути перезаписані при оновленні GPO" -f $gpo.Count) }
 
     foreach ($a in $Settings.AuditPolicy) {
         $want = [int]$a[$RoleName]
@@ -622,7 +622,7 @@ function Invoke-AuditPolicy {
         $item = $a.Name
         $gpoNote = ''
         if ($gpo.ContainsKey($guid) -and (($gpo[$guid] -bor $want) -ne $gpo[$guid])) {
-            $gpoNote = ('GPO sets {0}, want at least {1} - update the GPO' -f (Format-AuditValue $gpo[$guid]), (Format-AuditValue $want))
+            $gpoNote = ('GPO задає {0}, потрібно щонайменше {1} - оновіть GPO' -f (Format-AuditValue $gpo[$guid]), (Format-AuditValue $want))
         }
         if ($target -eq $cur) {
             if ($gpoNote) { Add-Result 'AuditPolicy' $item 'Warning' $gpoNote (Format-AuditValue $cur) (Format-AuditValue $cur) }
@@ -634,7 +634,7 @@ function Invoke-AuditPolicy {
         if ($target -band 1) { $wargs += '/success:enable' }
         if ($target -band 2) { $wargs += '/failure:enable' }
         $r = Invoke-Native 'auditpol.exe' $wargs
-        if ($r.Code -ne 0) { Add-Result 'AuditPolicy' $item 'Error' ("auditpol exit {0}: {1}" -f $r.Code, $r.Output) (Format-AuditValue $cur) $null }
+        if ($r.Code -ne 0) { Add-Result 'AuditPolicy' $item 'Error' ("auditpol код {0}: {1}" -f $r.Code, $r.Output) (Format-AuditValue $cur) $null }
         else { $a.Pending = $target }
     }
 
@@ -647,15 +647,15 @@ function Invoke-AuditPolicy {
         $was = 0; if ($current.ContainsKey($guid)) { $was = $current[$guid] }
         if (($now -band $a.Pending) -eq $a.Pending) {
             $status = 'Changed'; $msg = '{0} -> {1}' -f (Format-AuditValue $was), (Format-AuditValue $now)
-            if ($gpo.ContainsKey($guid) -and (($gpo[$guid] -bor $a.Pending) -ne $gpo[$guid])) { $status = 'Warning'; $msg += '; GPO will overwrite it - update the GPO' }
+            if ($gpo.ContainsKey($guid) -and (($gpo[$guid] -bor $a.Pending) -ne $gpo[$guid])) { $status = 'Warning'; $msg += '; GPO це перезапише - оновіть GPO' }
             Add-Result 'AuditPolicy' $a.Name $status $msg (Format-AuditValue $was) (Format-AuditValue $now)
         }
-        else { Add-Result 'AuditPolicy' $a.Name 'Error' ('not applied, now {0}' -f (Format-AuditValue $now)) (Format-AuditValue $was) (Format-AuditValue $now) }
+        else { Add-Result 'AuditPolicy' $a.Name 'Error' ('не застосовано, зараз {0}' -f (Format-AuditValue $now)) (Format-AuditValue $was) (Format-AuditValue $now) }
     }
 }
 
 #endregion
-#region ---------------------------------------------------------------- registry
+#region ---------------------------------------------------------------- реєстр
 
 function Invoke-RegistrySettings {
     param($Settings, [string]$RoleName)
@@ -663,9 +663,9 @@ function Invoke-RegistrySettings {
     foreach ($r in $Settings.Registry) { if (-not $r.DC -or $RoleName -eq 'DomainController') { $items += $r } }
     if ($TranscriptionPath) {
         $t = 'SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription'
-        $items += @{ Path = $t; Name = 'EnableTranscripting'; Type = 'DWord'; Value = 1; Mode = 'Min'; Why = 'PowerShell transcription' }
-        $items += @{ Path = $t; Name = 'EnableInvocationHeader'; Type = 'DWord'; Value = 1; Mode = 'Min'; Why = 'Transcription timestamps' }
-        $items += @{ Path = $t; Name = 'OutputDirectory'; Type = 'String'; Value = $TranscriptionPath; Mode = 'Exact'; Why = 'Transcription folder' }
+        $items += @{ Path = $t; Name = 'EnableTranscripting'; Type = 'DWord'; Value = 1; Mode = 'Min'; Why = 'PowerShell Transcription' }
+        $items += @{ Path = $t; Name = 'EnableInvocationHeader'; Type = 'DWord'; Value = 1; Mode = 'Min'; Why = 'Мітки часу в Transcription' }
+        $items += @{ Path = $t; Name = 'OutputDirectory'; Type = 'String'; Value = $TranscriptionPath; Mode = 'Exact'; Why = 'Тека для Transcription' }
     }
     foreach ($r in $items) {
         $item = '{0}\{1}' -f $r.Path, $r.Name
@@ -687,16 +687,16 @@ function Invoke-RegistrySettings {
 function Initialize-TranscriptionFolder {
     param([string]$Path)
     if ($Path -like '\\*') {
-        Add-Result 'PowerShell' 'Transcription share' 'Warning' 'UNC path: set the share ACL yourself (Authenticated Users: write-only, Admins: full)'
+        Add-Result 'PowerShell' 'Шара для Transcription' 'Warning' 'UNC-шлях: ACL шари налаштуйте самі (Authenticated Users: лише запис, адміністратори: повний доступ)'
         return
     }
-    if (Test-Path -LiteralPath $Path) { Add-Result 'PowerShell' 'Transcription folder' 'OK' $Path; return }
-    if ($AuditOnly) { Add-Result 'PowerShell' 'Transcription folder' 'WouldChange' "create $Path with write-only ACL"; return }
+    if (Test-Path -LiteralPath $Path) { Add-Result 'PowerShell' 'Тека Transcription' 'OK' $Path; return }
+    if ($AuditOnly) { Add-Result 'PowerShell' 'Тека Transcription' 'WouldChange' "створити $Path з ACL лише на запис"; return }
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
-    # SYSTEM + Administrators: full; Authenticated Users: write only (cannot read others' transcripts)
+    # SYSTEM + Administrators: повний доступ; Authenticated Users: лише запис (не можуть читати чужі транскрипти)
     $r = Invoke-Native 'icacls.exe' @($Path, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-11:(OI)(CI)(W)')
-    if ($r.Code -eq 0) { Add-Result 'PowerShell' 'Transcription folder' 'Changed' "$Path created, write-only ACL" }
-    else { Add-Result 'PowerShell' 'Transcription folder' 'Error' $r.Output }
+    if ($r.Code -eq 0) { Add-Result 'PowerShell' 'Тека Transcription' 'Changed' "$Path створено, ACL лише на запис" }
+    else { Add-Result 'PowerShell' 'Тека Transcription' 'Error' $r.Output }
 }
 
 #endregion
@@ -704,19 +704,19 @@ function Initialize-TranscriptionFolder {
 
 function Invoke-PowerShellV2Check {
     param($HostInfo)
-    if ($HostInfo.IsLegacyOS) { Add-Result 'PowerShell' 'PowerShell 2.0 engine' 'Skipped' 'Legacy OS: v2 is the native engine, cannot be removed'; return }
-    if (-not (Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue)) { Add-Result 'PowerShell' 'PowerShell 2.0 engine' 'Skipped' 'DISM cmdlets not available'; return }
+    if ($HostInfo.IsLegacyOS) { Add-Result 'PowerShell' 'PowerShell 2.0 engine' 'Skipped' 'Стара ОС: v2 - основний рушій, видалити неможливо'; return }
+    if (-not (Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue)) { Add-Result 'PowerShell' 'PowerShell 2.0 engine' 'Skipped' 'Командлети DISM недоступні'; return }
     try { $features = @(Get-WindowsOptionalFeature -Online | Where-Object { $_.FeatureName -like 'MicrosoftWindowsPowerShellV2*' }) }
     catch { Add-Result 'PowerShell' 'PowerShell 2.0 engine' 'Error' $_.Exception.Message; return }
-    if ($features.Count -eq 0) { Add-Result 'PowerShell' 'PowerShell 2.0 engine' 'OK' 'Not present on this OS'; return }
+    if ($features.Count -eq 0) { Add-Result 'PowerShell' 'PowerShell 2.0 engine' 'OK' 'Відсутній у цій ОС'; return }
     foreach ($f in $features) {
         $state = [string]$f.State
-        if ($state -notlike 'Enabled*') { Add-Result 'PowerShell' $f.FeatureName 'OK' "State: $state"; continue }
-        if (-not $DisablePowerShellV2) { Add-Result 'PowerShell' $f.FeatureName 'Warning' 'PowerShell 2.0 is enabled (downgrade attack bypasses logging). Use -DisablePowerShellV2'; continue }
-        if ($AuditOnly) { Add-Result 'PowerShell' $f.FeatureName 'WouldChange' 'disable'; continue }
+        if ($state -notlike 'Enabled*') { Add-Result 'PowerShell' $f.FeatureName 'OK' "Стан: $state"; continue }
+        if (-not $DisablePowerShellV2) { Add-Result 'PowerShell' $f.FeatureName 'Warning' 'PowerShell 2.0 увімкнено (downgrade-атака обходить журналювання). Використайте -DisablePowerShellV2'; continue }
+        if ($AuditOnly) { Add-Result 'PowerShell' $f.FeatureName 'WouldChange' 'вимкнути'; continue }
         try {
             Disable-WindowsOptionalFeature -Online -FeatureName $f.FeatureName -NoRestart -WarningAction SilentlyContinue | Out-Null
-            Add-Result 'PowerShell' $f.FeatureName 'Changed' 'Disabled'
+            Add-Result 'PowerShell' $f.FeatureName 'Changed' 'Вимкнено'
         }
         catch { Add-Result 'PowerShell' $f.FeatureName 'Error' $_.Exception.Message }
     }
@@ -750,25 +750,25 @@ function Get-SysmonExeName {
 }
 
 function Resolve-SourceFile {
-    # Finds a package file in -SourcePath or downloads it (online mode); verifies SHA256 pin.
+    # Шукає файл пакета в -SourcePath або завантажує його (online); перевіряє закріплений SHA256.
     param([string]$RelPath, [string]$Url, [string]$Pin, [string]$Label, [switch]$AllowUnpinned)
     $file = $null
     if ($SourcePath) {
         $candidate = Join-Path $SourcePath $RelPath
         if (Test-Path -LiteralPath $candidate) { $file = $candidate }
-        elseif (-not $Online) { throw "$Label not found in package: $candidate" }
+        elseif (-not $Online) { throw "$Label не знайдено в пакеті: $candidate" }
     }
     if (-not $file) {
-        if (-not $Url) { throw "$Label is not in the package and cannot be downloaded" }
+        if (-not $Url) { throw "$Label відсутній у пакеті й не може бути завантажений" }
         $file = Join-Path $WorkDir ('cache\' + $RelPath)
         Save-Download $Url $file
     }
     $hash = Get-FileSha256 $file
     if ($Pin) {
-        if ($hash -ne $Pin.ToLower()) { throw "$Label SHA256 mismatch: got $hash, pinned $Pin ($file). New release or tampering - rebuild the package with -BuildPackage." }
+        if ($hash -ne $Pin.ToLower()) { throw "${Label}: SHA256 не збігається: отримано $hash, закріплено $Pin ($file). Новий реліз або підміна - перезберіть пакет через -BuildPackage." }
     }
     elseif (-not $AllowUnpinned) {
-        throw "$Label has no pinned SHA256 (got $hash). Build a package with -BuildPackage or use -AllowUnpinnedSysmon."
+        throw "${Label}: немає закріпленого SHA256 (отримано $hash). Зберіть пакет через -BuildPackage або використайте -AllowUnpinnedSysmon."
     }
     @{ Path = $file; Sha256 = $hash }
 }
@@ -776,11 +776,11 @@ function Resolve-SourceFile {
 function Invoke-Sysmon {
     param($HostInfo)
     $state = Get-SysmonState
-    $desc = 'not installed'
+    $desc = 'не встановлено'
     if ($state.Installed) { $desc = '{0} v{1} ({2})' -f $state.ServiceName, $state.Version, $state.State }
-    if ($SkipSysmon) { Add-Result 'Sysmon' 'Sysmon' 'Skipped' "-SkipSysmon; current: $desc"; return }
+    if ($SkipSysmon) { Add-Result 'Sysmon' 'Sysmon' 'Skipped' "-SkipSysmon; зараз: $desc"; return }
     if (-not $state.Installed -and $state.ChannelExists) {
-        Add-Result 'Sysmon' 'Sysmon' 'Warning' 'Sysmon channel exists but no Sysmon/Sysmon64 service: installed under a custom name? Not touching it.'
+        Add-Result 'Sysmon' 'Sysmon' 'Warning' 'Канал Sysmon існує, але служби Sysmon/Sysmon64 немає: встановлено під іншою назвою? Не чіпаємо.'
         return
     }
 
@@ -788,11 +788,11 @@ function Invoke-Sysmon {
     $legacy = $HostInfo.IsLegacyOS
     if ($legacy) {
         if (-not $AllowLegacySysmon) {
-            Add-Result 'Sysmon' 'Sysmon' $(if ($state.Installed) { 'OK' } else { 'Warning' }) "Legacy OS ($($HostInfo.OSCaption)): modern Sysmon may hang/BSOD. Current: $desc. Use -AllowLegacySysmon with legacy\Sysmon.zip (10.42)."
+            Add-Result 'Sysmon' 'Sysmon' $(if ($state.Installed) { 'OK' } else { 'Warning' }) "Стара ОС ($($HostInfo.OSCaption)): сучасний Sysmon може спричинити зависання/BSOD. Зараз: $desc. Використайте -AllowLegacySysmon з legacy\Sysmon.zip (10.42)."
             return
         }
         if ([version]$HostInfo.OSVersion -ge [version]'6.1') {
-            Add-Result 'Sysmon' 'SHA-2 support' 'Warning' 'Server 2008 R2 / Win7: Sysmon driver needs SHA-2 code signing support (KB4474419 + KB4490628). Verify before install.'
+            Add-Result 'Sysmon' 'Підтримка SHA-2' 'Warning' 'Server 2008 R2 / Win7: драйверу Sysmon потрібна підтримка підпису SHA-2 (KB4474419 + KB4490628). Перевірте перед встановленням.'
         }
         $zipRel = 'legacy\Sysmon.zip'; $cfgRel = 'legacy\sysmonconfig-export.xml'
         $zipPin = $pins.LegacySysmonZipSha256; $cfgPin = $pins.LegacyConfigSha256; $cfgUrl = $pins.LegacyConfigUrl; $zipUrl = $null
@@ -803,10 +803,10 @@ function Invoke-Sysmon {
     }
 
     try {
-        $cfg = Resolve-SourceFile $cfgRel $cfgUrl $cfgPin 'Sysmon config'
-        Add-Result 'Sysmon' 'Config source' 'OK' ('{0} sha256={1}' -f $cfg.Path, $cfg.Sha256)
+        $cfg = Resolve-SourceFile $cfgRel $cfgUrl $cfgPin 'Конфіг Sysmon'
+        Add-Result 'Sysmon' 'Джерело конфігу' 'OK' ('{0} sha256={1}' -f $cfg.Path, $cfg.Sha256)
     }
-    catch { Add-Result 'Sysmon' 'Config source' 'Error' $_.Exception.Message; return }
+    catch { Add-Result 'Sysmon' 'Джерело конфігу' 'Error' $_.Exception.Message; return }
 
     $configOk = $state.Installed -and $state.AppliedConfigSha256 -eq $cfg.Sha256
     $needInstall = -not $state.Installed
@@ -818,14 +818,14 @@ function Invoke-Sysmon {
             $extract = Join-Path $WorkDir 'sysmon-extract'
             Expand-ZipFile $zip.Path $extract
             $pkgExe = Join-Path $extract (Get-SysmonExeName $HostInfo.Architecture)
-            if (-not (Test-Path -LiteralPath $pkgExe)) { throw "$(Split-Path -Leaf $pkgExe) not found in Sysmon.zip" }
+            if (-not (Test-Path -LiteralPath $pkgExe)) { throw "$(Split-Path -Leaf $pkgExe) не знайдено в Sysmon.zip" }
             $sig = Test-MicrosoftSignature $pkgExe
-            if (-not $sig.Valid) { throw "Authenticode check failed: $($sig.Status) $($sig.Subject)" }
+            if (-not $sig.Valid) { throw "Перевірка підпису Authenticode не пройдена: $($sig.Status) $($sig.Subject)" }
             $pkgVersion = Get-VersionFromString (Get-Item -LiteralPath $pkgExe).VersionInfo.FileVersion
-            Add-Result 'Sysmon' 'Package' 'OK' ('v{0}, sha256={1}, signed by Microsoft' -f $pkgVersion, $zip.Sha256)
+            Add-Result 'Sysmon' 'Пакет' 'OK' ('v{0}, sha256={1}, підписано Microsoft' -f $pkgVersion, $zip.Sha256)
         }
         catch {
-            Add-Result 'Sysmon' 'Package' $(if ($needInstall) { 'Error' } else { 'Warning' }) $_.Exception.Message
+            Add-Result 'Sysmon' 'Пакет' $(if ($needInstall) { 'Error' } else { 'Warning' }) $_.Exception.Message
             if ($needInstall) { return }
         }
     }
@@ -834,40 +834,40 @@ function Invoke-Sysmon {
     $outdated = $state.Installed -and $pkgVersion -and $installedVersion -and ($installedVersion -lt $pkgVersion)
 
     if ($AuditOnly) {
-        if ($needInstall) { Add-Result 'Sysmon' 'Sysmon' 'WouldChange' "install v$pkgVersion" }
-        elseif ($outdated) { Add-Result 'Sysmon' 'Sysmon' 'WouldChange' "$desc -> v$pkgVersion (needs -UpgradeSysmon)" }
+        if ($needInstall) { Add-Result 'Sysmon' 'Sysmon' 'WouldChange' "встановити v$pkgVersion" }
+        elseif ($outdated) { Add-Result 'Sysmon' 'Sysmon' 'WouldChange' "$desc -> v$pkgVersion (потрібен -UpgradeSysmon)" }
         else { Add-Result 'Sysmon' 'Sysmon' 'OK' $desc }
-        if (-not $needInstall -and -not $configOk) { Add-Result 'Sysmon' 'Config' 'WouldChange' "apply $($cfg.Sha256)" }
-        elseif ($configOk) { Add-Result 'Sysmon' 'Config' 'OK' $cfg.Sha256 }
+        if (-not $needInstall -and -not $configOk) { Add-Result 'Sysmon' 'Конфіг' 'WouldChange' "застосувати $($cfg.Sha256)" }
+        elseif ($configOk) { Add-Result 'Sysmon' 'Конфіг' 'OK' $cfg.Sha256 }
         return
     }
 
     if ($outdated -and $UpgradeSysmon) {
         $r = Invoke-Native $state.Path @('-u', 'force')
-        if ($r.Code -ne 0) { Add-Result 'Sysmon' 'Uninstall old' 'Error' $r.Output; return }
-        Add-Result 'Sysmon' 'Uninstall old' 'Changed' "removed $desc"
+        if ($r.Code -ne 0) { Add-Result 'Sysmon' 'Видалення старої версії' 'Error' $r.Output; return }
+        Add-Result 'Sysmon' 'Видалення старої версії' 'Changed' "видалено $desc"
         $needInstall = $true
     }
-    elseif ($outdated) { Add-Result 'Sysmon' 'Version' 'Warning' "$desc is older than package v$pkgVersion (use -UpgradeSysmon)" }
+    elseif ($outdated) { Add-Result 'Sysmon' 'Версія' 'Warning' "$desc старіший за пакет v$pkgVersion (використайте -UpgradeSysmon)" }
 
     if ($needInstall) {
         $r = Invoke-Native $pkgExe @('-accepteula', '-i', $cfg.Path)
         $after = Get-SysmonState
         if ($r.Code -eq 0 -and $after.Installed -and $after.State -eq 'Running') {
             Set-RegValue $StateRegPath 'SysmonConfigSha256' $cfg.Sha256 'String'
-            Add-Result 'Sysmon' 'Sysmon' 'Changed' ('installed {0} v{1}, config {2}' -f $after.ServiceName, $after.Version, $cfg.Sha256)
+            Add-Result 'Sysmon' 'Sysmon' 'Changed' ('встановлено {0} v{1}, конфіг {2}' -f $after.ServiceName, $after.Version, $cfg.Sha256)
         }
-        else { Add-Result 'Sysmon' 'Sysmon' 'Error' ("install exit {0}: {1}" -f $r.Code, $r.Output) }
+        else { Add-Result 'Sysmon' 'Sysmon' 'Error' ("встановлення: код {0}: {1}" -f $r.Code, $r.Output) }
         return
     }
 
-    if ($configOk) { Add-Result 'Sysmon' 'Sysmon' 'OK' "$desc, config $($cfg.Sha256)"; return }
+    if ($configOk) { Add-Result 'Sysmon' 'Sysmon' 'OK' "$desc, конфіг $($cfg.Sha256)"; return }
     $r = Invoke-Native $state.Path @('-c', $cfg.Path)
     if ($r.Code -eq 0) {
         Set-RegValue $StateRegPath 'SysmonConfigSha256' $cfg.Sha256 'String'
-        Add-Result 'Sysmon' 'Config' 'Changed' ('applied {0}' -f $cfg.Sha256) $state.AppliedConfigSha256 $cfg.Sha256
+        Add-Result 'Sysmon' 'Конфіг' 'Changed' ('застосовано {0}' -f $cfg.Sha256) $state.AppliedConfigSha256 $cfg.Sha256
     }
-    else { Add-Result 'Sysmon' 'Config' 'Error' ("sysmon -c exit {0}: {1}" -f $r.Code, $r.Output) }
+    else { Add-Result 'Sysmon' 'Конфіг' 'Error' ("sysmon -c код {0}: {1}" -f $r.Code, $r.Output) }
 }
 
 #endregion
@@ -879,7 +879,7 @@ function Get-WazuhLocations {
     foreach ($f in $Files) {
         if (-not (Test-Path -LiteralPath $f)) { continue }
         $text = [System.IO.File]::ReadAllText($f)
-        # ignore our own previous block? no - it counts as configured
+        # власний попередній блок теж враховується як налаштований
         foreach ($m in [regex]::Matches($text, '<location>\s*([^<]+?)\s*</location>')) { $loc += $m.Groups[1].Value.ToLower() }
     }
     $loc
@@ -887,7 +887,7 @@ function Get-WazuhLocations {
 
 function New-WazuhBlock {
     param([string[]]$Channels)
-    $lines = @('<!-- SecLogging BEGIN (managed by Set-SecurityLogging.ps1) -->', '<ossec_config>')
+    $lines = @('<!-- SecLogging BEGIN (керується Set-SecurityLogging.ps1) -->', '<ossec_config>')
     foreach ($c in $Channels) {
         $lines += '  <localfile>'
         $lines += "    <location>$c</location>"
@@ -903,7 +903,7 @@ function Invoke-Wazuh {
     param($Settings, [string]$RoleName)
     $svc = $null
     foreach ($n in @('WazuhSvc', 'OssecSvc')) { $svc = Get-WmiObject Win32_Service -Filter "Name='$n'"; if ($svc) { break } }
-    if (-not $svc) { Add-Result 'Wazuh' 'Agent' 'Warning' 'Wazuh agent is not installed - logs stay local only'; return }
+    if (-not $svc) { Add-Result 'Wazuh' 'Агент' 'Warning' 'Агент Wazuh не встановлено - журнали залишаються лише локально'; return }
     $exe = $null
     if ([string]$svc.PathName -match '^"?([^"]+?\.exe)') { $exe = $Matches[1] }
     $dir = Split-Path -Parent $exe
@@ -911,7 +911,7 @@ function Invoke-Wazuh {
     $shared = Join-Path $dir 'shared\agent.conf'
     $ver = ''
     foreach ($vf in @('VERSION', 'VERSION.json')) { $p = Join-Path $dir $vf; if (Test-Path -LiteralPath $p) { $ver = ((Get-Content -LiteralPath $p) -join ' ').Trim(); break } }
-    Add-Result 'Wazuh' 'Agent' 'OK' ('{0} ({1}) {2}' -f $svc.Name, $svc.State, $ver)
+    Add-Result 'Wazuh' 'Агент' 'OK' ('{0} ({1}) {2}' -f $svc.Name, $svc.State, $ver)
 
     $present = Get-WazuhLocations @($conf, $shared)
     $missing = @()
@@ -921,12 +921,12 @@ function Invoke-Wazuh {
         if (-not (Get-ChannelState $c.N).Exists) { continue }
         if ($present -notcontains $c.N.ToLower()) { $missing += $c.N }
     }
-    if ($missing.Count -eq 0) { Add-Result 'Wazuh' 'eventchannel' 'OK' 'All local security channels are collected'; return }
+    if ($missing.Count -eq 0) { Add-Result 'Wazuh' 'eventchannel' 'OK' 'Усі локальні канали безпеки збираються'; return }
     if (-not $ConfigureWazuh) {
-        Add-Result 'Wazuh' 'eventchannel' 'Warning' ('Not collected: {0}. Use the manager agent.conf group (wazuh\shared) or -ConfigureWazuh' -f ($missing -join ', '))
+        Add-Result 'Wazuh' 'eventchannel' 'Warning' ('Не збираються: {0}. Використайте групу agent.conf на менеджері (wazuh\shared) або -ConfigureWazuh' -f ($missing -join ', '))
         return
     }
-    if ($AuditOnly) { Add-Result 'Wazuh' 'eventchannel' 'WouldChange' ('add {0}' -f ($missing -join ', ')); return }
+    if ($AuditOnly) { Add-Result 'Wazuh' 'eventchannel' 'WouldChange' ('додати {0}' -f ($missing -join ', ')); return }
     try {
         $text = [System.IO.File]::ReadAllText($conf)
         $old = @()
@@ -940,13 +940,13 @@ function Invoke-Wazuh {
         $text = $text.TrimEnd() + "`r`n`r`n" + (New-WazuhBlock $all) + "`r`n"
         [System.IO.File]::WriteAllText($conf, $text, (New-Object System.Text.UTF8Encoding($false)))
         Restart-Service -Name $svc.Name -Force
-        Add-Result 'Wazuh' 'eventchannel' 'Changed' ('added {0}; agent restarted (backup: ossec.conf.seclogging.bak)' -f ($missing -join ', '))
+        Add-Result 'Wazuh' 'eventchannel' 'Changed' ('додано {0}; агента перезапущено (резервна копія: ossec.conf.seclogging.bak)' -f ($missing -join ', '))
     }
     catch { Add-Result 'Wazuh' 'eventchannel' 'Error' $_.Exception.Message }
 }
 
 #endregion
-#region ---------------------------------------------------------------- package builder
+#region ---------------------------------------------------------------- збирання пакета
 
 function Invoke-BuildPackage {
     param([string]$OutDir)
@@ -954,7 +954,7 @@ function Invoke-BuildPackage {
     New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $OutDir 'legacy') -Force | Out-Null
 
-    Write-Host "Downloading $($pins.SysmonZipUrl)"
+    Write-Host "Завантаження $($pins.SysmonZipUrl)"
     $zip = Join-Path $OutDir 'Sysmon.zip'
     Save-Download $pins.SysmonZipUrl $zip
     $zipHash = Get-FileSha256 $zip
@@ -965,23 +965,23 @@ function Invoke-BuildPackage {
         $p = Join-Path $ex $exe
         if (-not (Test-Path -LiteralPath $p)) { continue }
         $sig = Test-MicrosoftSignature $p
-        if (-not $sig.Valid) { throw "$exe signature invalid: $($sig.Status) $($sig.Subject)" }
+        if (-not $sig.Valid) { throw "${exe}: недійсний підпис: $($sig.Status) $($sig.Subject)" }
         $version = Get-VersionFromString (Get-Item -LiteralPath $p).VersionInfo.FileVersion
-        Write-Host "  $exe v$version signed by Microsoft: OK"
+        Write-Host "  $exe v$version, підпис Microsoft: OK"
     }
     Remove-Item -LiteralPath $ex -Recurse -Force
     if ($pins.SysmonZipSha256 -and $pins.SysmonZipSha256 -ne $zipHash) {
-        if (-not $AcceptNewSysmon) { throw "Sysmon.zip hash $zipHash differs from pinned $($pins.SysmonZipSha256). New release? Re-run with -AcceptNewSysmon." }
-        Write-Warning "Accepting new Sysmon.zip $zipHash (was $($pins.SysmonZipSha256))"
+        if (-not $AcceptNewSysmon) { throw "Хеш Sysmon.zip $zipHash відрізняється від закріпленого $($pins.SysmonZipSha256). Новий реліз? Запустіть повторно з -AcceptNewSysmon." }
+        Write-Warning "Приймаємо новий Sysmon.zip $zipHash (був $($pins.SysmonZipSha256))"
     }
 
     foreach ($c in @(@{ Url = $pins.ConfigUrl; Pin = $pins.ConfigSha256; Rel = 'sysmonconfig-export.xml' }, @{ Url = $pins.LegacyConfigUrl; Pin = $pins.LegacyConfigSha256; Rel = 'legacy\sysmonconfig-export.xml' })) {
         $dst = Join-Path $OutDir $c.Rel
-        Write-Host "Downloading $($c.Url)"
+        Write-Host "Завантаження $($c.Url)"
         Save-Download $c.Url $dst
         $h = Get-FileSha256 $dst
-        if ($h -ne $c.Pin) { throw "$($c.Rel) hash $h does not match pin $($c.Pin)" }
-        Write-Host "  $($c.Rel) sha256 OK"
+        if ($h -ne $c.Pin) { throw "$($c.Rel): хеш $h не збігається із закріпленим $($c.Pin)" }
+        Write-Host "  $($c.Rel) sha256: OK"
     }
 
     $legacyHash = $pins.LegacySysmonZipSha256; $legacyVer = $pins.LegacySysmonVersion
@@ -994,7 +994,7 @@ function Invoke-BuildPackage {
             $p = Join-Path $ex $exe
             if (-not (Test-Path -LiteralPath $p)) { continue }
             $sig = Test-MicrosoftSignature $p
-            if (-not $sig.Valid) { throw "legacy $exe signature invalid: $($sig.Status)" }
+            if (-not $sig.Valid) { throw "legacy ${exe}: недійсний підпис: $($sig.Status)" }
             $legacyVer = [string](Get-VersionFromString (Get-Item -LiteralPath $p).VersionInfo.FileVersion)
         }
         Remove-Item -LiteralPath $ex -Recurse -Force
@@ -1004,7 +1004,7 @@ function Invoke-BuildPackage {
 
     Copy-Item -LiteralPath $ScriptPath -Destination (Join-Path $OutDir 'Set-SecurityLogging.ps1') -Force
     $ini = @(
-        "; Generated by Set-SecurityLogging.ps1 -BuildPackage on $(Get-Date -Format s)"
+        "; Згенеровано Set-SecurityLogging.ps1 -BuildPackage $(Get-Date -Format s)"
         "SysmonZipUrl=$($pins.SysmonZipUrl)"
         "SysmonZipSha256=$zipHash"
         "SysmonVersion=$version"
@@ -1017,16 +1017,16 @@ function Invoke-BuildPackage {
     )
     [System.IO.File]::WriteAllLines((Join-Path $OutDir 'sources.ini'), $ini)
     Write-Host ''
-    Write-Host "Package ready: $OutDir" -ForegroundColor Green
-    Write-Host 'Commit sources.ini to the repository (windows\sources.ini) so online installs are pinned too.'
+    Write-Host "Пакет готовий: $OutDir" -ForegroundColor Green
+    Write-Host 'Закомітьте sources.ini у репозиторій (windows\sources.ini), щоб online-встановлення теж перевірялося за хешем.'
 }
 
 #endregion
-#region ---------------------------------------------------------------- main
+#region ---------------------------------------------------------------- основна частина
 
 if ($ExportSettings) { return (Get-SecLoggingSettings) }
 
-# 32-bit PowerShell on 64-bit Windows would hit registry/file redirection: relaunch 64-bit.
+# 32-бітний PowerShell на 64-бітній Windows потрапить під перенаправлення реєстру/файлів: перезапуск у 64-біт.
 if ($env:PROCESSOR_ARCHITEW6432 -and -not $env:SECLOGGING_RELAUNCHED) {
     $ps = Join-Path $env:SystemRoot 'sysnative\WindowsPowerShell\v1.0\powershell.exe'
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath)
@@ -1045,10 +1045,10 @@ if ($BuildPackage) {
     catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 2 }
 }
 
-if (-not (Test-IsAdmin)) { Write-Error 'Run as Administrator (elevated).'; exit 3 }
+if (-not (Test-IsAdmin)) { Write-Error 'Запустіть від імені адміністратора (з підвищеними правами).'; exit 3 }
 
 $mutex = New-Object System.Threading.Mutex($false, 'Global\SecLoggingRun')
-if (-not $mutex.WaitOne(0)) { Write-Host 'Another Set-SecurityLogging run is in progress, exiting.'; exit 0 }
+if (-not $mutex.WaitOne(0)) { Write-Host 'Інший запуск Set-SecurityLogging уже виконується, вихід.'; exit 0 }
 
 try {
     if (-not (Test-Path -LiteralPath $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
@@ -1060,14 +1060,14 @@ try {
 
     if (-not $Quiet) {
         Write-Host ''
-        Write-Host ('Set-SecurityLogging {0}  mode: {1}' -f $ScriptVersion, $(if ($AuditOnly) { 'AUDIT ONLY' } else { 'APPLY' })) -ForegroundColor White
-        Write-Host ('{0}: {1} ({2}), role {3}, domain {4}, {5}, PS {6}, free {7} MB' -f $hostInfo.ComputerName, $hostInfo.OSCaption, $hostInfo.OSVersion, $roleName, $(if ($hostInfo.PartOfDomain) { $hostInfo.Domain } else { '-' }), $hostInfo.Architecture, $hostInfo.PSVersion, $hostInfo.SystemDriveFreeMB)
-        if ($SourcePath) { Write-Host "Source: package $SourcePath" } else { Write-Host 'Source: online (pinned URLs)' }
+        Write-Host ('Set-SecurityLogging {0}  режим: {1}' -f $ScriptVersion, $(if ($AuditOnly) { 'ЛИШЕ ПЕРЕВІРКА' } else { 'ЗАСТОСУВАННЯ' })) -ForegroundColor White
+        Write-Host ('{0}: {1} ({2}), роль {3}, домен {4}, {5}, PS {6}, вільно {7} МБ' -f $hostInfo.ComputerName, $hostInfo.OSCaption, $hostInfo.OSVersion, $roleName, $(if ($hostInfo.PartOfDomain) { $hostInfo.Domain } else { '-' }), $hostInfo.Architecture, $hostInfo.PSVersion, $hostInfo.SystemDriveFreeMB)
+        if ($SourcePath) { Write-Host "Джерело: пакет $SourcePath" } else { Write-Host 'Джерело: online (закріплені URL)' }
         Write-Host ''
     }
-    Add-Result 'Host' 'Role' 'OK' ('{0} (detected {1}, legacy OS: {2})' -f $roleName, $hostInfo.DetectedRole, $hostInfo.IsLegacyOS)
+    Add-Result 'Host' 'Роль' 'OK' ('{0} (визначено {1}, стара ОС: {2})' -f $roleName, $hostInfo.DetectedRole, $hostInfo.IsLegacyOS)
 
-    # Sysmon first: its channel must exist before sizing.
+    # Спершу Sysmon: його канал має існувати до налаштування розмірів.
     foreach ($step in @(
             @{ Name = 'Sysmon'; Block = { Invoke-Sysmon $hostInfo } }
             @{ Name = 'Registry'; Block = { Invoke-RegistrySettings $settings $roleName } }
@@ -1077,7 +1077,7 @@ try {
             @{ Name = 'Wazuh'; Block = { Invoke-Wazuh $settings $roleName } }
         )) {
         try { & $step.Block }
-        catch { Add-Result $step.Name 'Step failed' 'Error' $_.Exception.Message }
+        catch { Add-Result $step.Name 'Крок завершився помилкою' 'Error' $_.Exception.Message }
     }
 
     if (-not $AuditOnly) {
@@ -1103,7 +1103,7 @@ try {
     [System.IO.File]::WriteAllText((Join-Path $WorkDir 'last-report.json'), $json, (New-Object System.Text.UTF8Encoding($false)))
 
     if (-not $AuditOnly) {
-        # Summary event for the SIEM (Application log, source SecLogging): 1000 ok, 1001 warnings, 1002 errors.
+        # Підсумкова подія для SIEM (журнал Application, джерело SecLogging): 1000 - ок, 1001 - попередження, 1002 - помилки.
         try {
             if (-not [System.Diagnostics.EventLog]::SourceExists('SecLogging')) { New-EventLog -LogName Application -Source SecLogging }
             $id = 1000; $type = 'Information'
@@ -1112,12 +1112,12 @@ try {
             $problems = @($Script:Report | Where-Object { $_.Status -eq 'Error' -or $_.Status -eq 'Warning' } | ForEach-Object { '{0} | {1} | {2} | {3}' -f $_.Status, $_.Area, $_.Item, $_.Message })
             Write-EventLog -LogName Application -Source SecLogging -EventId $id -EntryType $type -Message ("Set-SecurityLogging $ScriptVersion role=$roleName $summary`r`n" + ($problems -join "`r`n"))
         }
-        catch { Write-Verbose "Cannot write summary event: $($_.Exception.Message)" }
+        catch { Write-Verbose "Не вдалося записати підсумкову подію: $($_.Exception.Message)" }
     }
 
     Write-Host ''
-    Write-Host "Summary: $summary" -ForegroundColor White
-    Write-Host "Report:  $ReportPath"
+    Write-Host "Підсумок: $summary" -ForegroundColor White
+    Write-Host "Звіт:     $ReportPath"
     if ($Script:Counts.Error) { exit 2 }
     exit 0
 }
