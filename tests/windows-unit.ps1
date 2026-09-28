@@ -250,6 +250,24 @@ $t = Test-Package $pkg2 $true
 Assert (($t.Problems -join ' ') -match 'немає legacy.10\.42.Sysmon.zip') 'відсутній legacy\10.42\Sysmon.zip виявлено'
 Remove-Item -LiteralPath $pkg2 -Recurse -Force
 
+Write-Host 'Запуск дочірніх процесів і стендовий скрипт'
+Assert ((ConvertTo-ArgumentString @('-File', 'C:\Program Files\x.ps1', '-SharePath', 'C:\SecLab', '-Empty', '')) -eq '-File "C:\Program Files\x.ps1" -SharePath C:\SecLab -Empty ""') 'аргументи з пробілами і порожні - в лапках'
+foreach ($lv in '10.42', '10.2') {
+    $lk = Get-LegacyKey $lv
+    Assert ((Get-FileSha256 (Join-Path $root "vendor/sysmon-config/$lv/sysmonconfig-export.xml")) -eq $s.Pins["${lk}ConfigSha256"]) "${lv}: хеш конфігу у vendor збігається із закріпленим"
+}
+Import-ScriptFunctions (Join-Path $root 'windows/lab/Test-LegacySysmon.ps1')
+$lp = Join-Path ([IO.Path]::GetTempPath()) ('labpkg-' + [guid]::NewGuid())
+$null = New-LocalPackage $root $lp
+foreach ($lv in '10.42', '10.2') {
+    $lk = Get-LegacyKey $lv
+    Assert ((Get-FileSha256 (Join-Path $lp "legacy/$lv/Sysmon.zip")) -eq $s.Pins["${lk}ZipSha256"]) "${lv}: локальний пакет - Sysmon.zip з правильним хешем"
+    Assert ((Get-FileSha256 (Join-Path $lp "legacy/$lv/sysmonconfig-export.xml")) -eq $s.Pins["${lk}ConfigSha256"]) "${lv}: локальний пакет - конфіг з правильним хешем"
+}
+Assert (Test-Path -LiteralPath (Join-Path $lp 'Set-SecurityLogging.ps1')) 'локальний пакет містить Set-SecurityLogging.ps1'
+Remove-Item -LiteralPath $lp -Recurse -Force
+Assert ((Get-KbNumber 'windows6.1-kb4474419-v3-x64_b5614c6cea5cb4e198717789633dca16308ef79c.msu') -eq 'KB4474419') 'номер KB з імені .msu'
+
 Write-Host ''
 Write-Host "Пройдено: $script:passed  Не пройдено: $script:failed"
 if ($script:failed) { exit 1 }

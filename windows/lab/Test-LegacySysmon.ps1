@@ -4,8 +4,14 @@
     Стендова перевірка Sysmon для старих ОС (Windows 7 / Server 2008 / 2008 R2): одна команда у VM.
 
 .DESCRIPTION
-    Запускається у VM з мережевої шари, підготовленої на хості командою
-    Install-SecLogging.ps1 -Mode Share -SharePath <тека>. Кроки:
+    Два способи запуску:
+      а) з мережевої шари, підготовленої на хості командою
+         Install-SecLogging.ps1 -Mode Share -SharePath <тека> (оновлення й результати - на шарі);
+      б) прямо з розпакованого ZIP репозиторію у VM, наприклад
+         C:\SecLab\sec_journal_on-<коміт>\windows\lab\Test-LegacySysmon.ps1 - пакет збирається
+         локально з vendor\ (без мережі), оновлення беруться з C:\SecLab\updates, результати -
+         у C:\SecLab\results (тобто в теці, куди розпаковано ZIP).
+    Кроки:
 
       1. Оновлення: встановлює всі *.msu з <шара>\updates (за іменем файлу, пропускаючи вже
          встановлені). Якщо потрібне перезавантаження - зупиняється й просить перезапустити.
@@ -20,7 +26,8 @@
     перезавантаження та через добу роботи.
 
 .PARAMETER Share
-    Тека або UNC-шлях пакета. За замовчуванням - тека, де лежить цей скрипт, або її батьківська.
+    Тека або UNC-шлях пакета. За замовчуванням - тека, де лежить цей скрипт, або її батьківська,
+    або (запуск з репозиторію) локальний пакет, зібраний з vendor\.
 
 .PARAMETER SysmonVersion
     10.42 (за замовчуванням) або 10.2.
@@ -37,6 +44,9 @@
     powershell -ExecutionPolicy Bypass -File \\192.168.80.1\SecLab\lab\Test-LegacySysmon.ps1 -SysmonVersion 10.2
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File \\192.168.80.1\SecLab\lab\Test-LegacySysmon.ps1 -CollectOnly
+.EXAMPLE
+    # з розпакованого ZIP репозиторію у VM
+    powershell -ExecutionPolicy Bypass -File C:\SecLab\sec_journal_on-HEAD\windows\lab\Test-LegacySysmon.ps1
 #>
 [CmdletBinding()]
 param(
@@ -51,9 +61,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot = $null
+$WorkRoot = $null
 if (-not $Share) {
-    if (Test-Path -LiteralPath (Join-Path $here 'Set-SecurityLogging.ps1')) { $Share = $here }
-    else { $Share = Split-Path -Parent $here }
+    # пакет (шара) має теку legacy\ поруч зі Set-SecurityLogging.ps1; репозиторій - теку vendor\
+    $parent = Split-Path -Parent $here
+    $candidate = Split-Path -Parent $parent
+    if (Test-Path -LiteralPath (Join-Path $here 'legacy')) { $Share = $here }
+    elseif (Test-Path -LiteralPath (Join-Path $parent 'legacy')) { $Share = $parent }
+    elseif (Test-Path -LiteralPath (Join-Path $candidate 'vendor\sysmon')) { $RepoRoot = $candidate }   # <корінь>\windows\lab\
 }
 $StateKey = 'SOFTWARE\SecLogging\Lab'
 
@@ -84,6 +100,20 @@ function Test-HotFix {
     [bool](Get-HotFix -Id $Kb -ErrorAction SilentlyContinue)
 }
 
+function New-LocalPackage {
+    # Збирає пакет для старих ОС з репозиторію: скрипт + vendor\sysmon\<версія> + vendor\sysmon-config\<версія>.
+    # Хеші потім перевіряє Set-SecurityLogging.ps1 за вбудованими закріпленими значеннями.
+    param([string]$Repo, [string]$Destination)
+    foreach ($lv in @('10.42', '10.2')) {
+        $d = Join-Path $Destination (Join-Path 'legacy' $lv)
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $Repo (Join-Path 'vendor' (Join-Path 'sysmon' (Join-Path $lv 'Sysmon.zip')))) -Destination $d -Force
+        Copy-Item -LiteralPath (Join-Path $Repo (Join-Path 'vendor' (Join-Path 'sysmon-config' (Join-Path $lv 'sysmonconfig-export.xml')))) -Destination $d -Force
+    }
+    Copy-Item -LiteralPath (Join-Path $Repo (Join-Path 'windows' 'Set-SecurityLogging.ps1')) -Destination $Destination -Force
+    $Destination
+}
+
 function Get-SysmonService {
     foreach ($n in @('Sysmon64', 'Sysmon')) {
         $s = Get-WmiObject Win32_Service -Filter "Name='$n'"
@@ -96,7 +126,7 @@ function Save-Results {
     param([string]$Tag, [string[]]$Summary)
     $name = '{0}-{1}-{2:yyyyMMdd-HHmmss}' -f $env:COMPUTERNAME, $Tag, (Get-Date)
     $dir = $null
-    foreach ($base in @((Join-Path $Share 'results'), (Join-Path $env:ProgramData 'SecLogging\lab-results'))) {
+    foreach ($base in @((Join-Path $WorkRoot 'results'), (Join-Path $env:ProgramData 'SecLogging\lab-results'))) {
         try { New-Item -ItemType Directory -Path (Join-Path $base $name) -Force | Out-Null; $dir = Join-Path $base $name; break }
         catch { Write-Host "    не вдалося записати в $base, пробуємо локально" -ForegroundColor Yellow }
     }
@@ -133,8 +163,15 @@ function Get-CrashEvents {
 $p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Write-Host 'Запустіть від імені адміністратора.' -ForegroundColor Red; exit 3 }
 $os = Get-WmiObject Win32_OperatingSystem
-Write-Host ("Test-LegacySysmon  {0} ({1}), PS {2}, шара: {3}" -f $os.Caption, $os.Version, $PSVersionTable.PSVersion, $Share) -ForegroundColor White
-if (-not (Test-Path -LiteralPath (Join-Path $Share 'Set-SecurityLogging.ps1'))) { Write-Host "У $Share немає Set-SecurityLogging.ps1 - перевірте шлях до шари." -ForegroundColor Red; exit 2 }
+Write-Host ("Test-LegacySysmon  {0} ({1}), PS {2}" -f $os.Caption, $os.Version, $PSVersionTable.PSVersion) -ForegroundColor White
+if ($RepoRoot) {
+    # з репозиторію: пакет збирається локально, робоча тека - та, куди розпаковано ZIP
+    $WorkRoot = Split-Path -Parent $RepoRoot
+    $Share = New-LocalPackage $RepoRoot (Join-Path $env:ProgramData 'SecLogging\lab-package')
+    Write-Host "Запуск з репозиторію $RepoRoot; локальний пакет: $Share; робоча тека: $WorkRoot"
+}
+if (-not $Share -or -not (Test-Path -LiteralPath (Join-Path $Share 'Set-SecurityLogging.ps1'))) { Write-Host "Не знайдено Set-SecurityLogging.ps1 (шара: $Share) - перевірте шлях." -ForegroundColor Red; exit 2 }
+if (-not $WorkRoot) { $WorkRoot = $Share }
 
 $summary = @("Комп'ютер: $env:COMPUTERNAME", "ОС: $($os.Caption) $($os.Version) SP$($os.ServicePackMajorVersion)", "Час: $(Get-Date -Format s)")
 
@@ -157,7 +194,7 @@ if ($CollectOnly) {
 # ---- 1. оновлення
 if (-not $SkipUpdates) {
     Write-Step 'Оновлення з updates\'
-    $updDir = Join-Path $Share 'updates'
+    $updDir = Join-Path $WorkRoot 'updates'
     $needReboot = $false
     $msus = @()
     if (Test-Path -LiteralPath $updDir) { $msus = @(Get-ChildItem -LiteralPath $updDir -Filter '*.msu' | Sort-Object Name) }
@@ -188,7 +225,7 @@ $missing = @()
 foreach ($kb in @('KB4474419', 'KB4490628')) { if (Test-HotFix $kb) { Write-Host "    ${kb}: OK" } else { $missing += $kb } }
 if ($missing.Count) {
     Write-Host ("    не знайдено: {0}" -f ($missing -join ', ')) -ForegroundColor Yellow
-    Write-Host '    Покладіть .msu з Microsoft Update Catalog (x64, Windows Server 2008 R2) у теку updates на шарі.'
+    Write-Host "    Покладіть .msu з Microsoft Update Catalog (x64, Windows Server 2008 R2) у $(Join-Path $WorkRoot 'updates')"
     if (-not $Force) { Write-Host '    Зупинка. Щоб продовжити без них: -Force' -ForegroundColor Yellow; exit 4 }
 }
 

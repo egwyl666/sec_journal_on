@@ -205,14 +205,27 @@ function Expand-ZipFile {
     }
 }
 
+function ConvertTo-ArgumentString {
+    # Збирає командний рядок для Start-Process: аргументи з пробілами/порожні - у лапках
+    param([string[]]$Arguments)
+    $parts = @()
+    foreach ($a in $Arguments) {
+        if ($a -eq '' -or $a -match '[\s"]') { $parts += ('"' + ($a -replace '"', '\"') + '"') } else { $parts += $a }
+    }
+    $parts -join ' '
+}
+
 function Invoke-ChildScript {
-    # Запускає .ps1 в окремому процесі Windows PowerShell; повертає код виходу
+    # Запускає .ps1 в окремому процесі Windows PowerShell; повертає лише код виходу.
+    # Вивід дочірнього процесу йде прямо в консоль (не перехоплюється): інакше він змішується
+    # з кодом виходу, а кирилиця псується кодовою сторінкою консолі.
     param([string]$Script, [string[]]$Arguments)
     $ps = Join-Path $PSHOME 'powershell.exe'
     if (-not (Test-Path -LiteralPath $ps)) { $ps = 'powershell.exe' }
+    $argLine = ConvertTo-ArgumentString (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Script) + $Arguments)
     Write-Host ("    {0} {1}" -f (Split-Path -Leaf $Script), ($Arguments -join ' ')) -ForegroundColor DarkGray
-    & $ps -NoProfile -ExecutionPolicy Bypass -File $Script @Arguments
-    $LASTEXITCODE
+    $proc = Start-Process -FilePath $ps -ArgumentList $argLine -NoNewWindow -Wait -PassThru
+    [int]$proc.ExitCode
 }
 
 function Test-IsAdmin {

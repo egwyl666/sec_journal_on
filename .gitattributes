@@ -4,3 +4,4 @@
 *.md text
 *.zip binary
 *.exe binary
+*.xml -text

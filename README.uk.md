@@ -18,6 +18,7 @@ windows/Install-SecLogging.ps1    автоматизація: завантажи
 linux/set-security-logging.sh     єдиний скрипт для Linux (Debian/Ubuntu, RHEL/Rocky/Alma, SUSE)
 linux/install.sh                  автоматизація: офлайн-комплект (build) і встановлення (онлайн або --from)
 vendor/sysmon/10.42, 10.2/        Sysmon для Windows 7 / 2008 / 2008 R2 (перевірено, хеш закріплено)
+vendor/sysmon-config/             конфіги SwiftOnSecurity для цих версій (CC BY 4.0, хеш закріплено)
 windows/lab/Test-LegacySysmon.ps1 стендова перевірка legacy Sysmon у VM (одна команда)
 wazuh/shared/<група>/agent.conf   централізований збір журналів для груп менеджера Wazuh
 tests/                            тести (pwsh + docker)
@@ -249,6 +250,22 @@ type C:\ProgramData\SecLogging\last-report.json   :: після перезава
    powershell -ExecutionPolicy Bypass -File \\192.168.80.1\SecLab\lab\Test-LegacySysmon.ps1 -SysmonVersion 10.2
    ```
 
+**Без прав адміністратора на хості.** Тоді хосту потрібен лише браузер, а решту робить VM, де ви адміністратор:
+
+1. **VM** (`cmd` від адміністратора): створити шару для файлів і показати IP-адресу VM.
+   ```cmd
+   mkdir C:\SecLab\updates & net share SecLab=C:\SecLab /grant:Everyone,FULL & icacls C:\SecLab /grant Everyone:(OI)(CI)F & netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes & ipconfig
+   ```
+2. **Хост** (браузер, без прав адміністратора):
+   - завантажте ZIP репозиторію: <https://github.com/egwyl666/sec_journal_on/archive/HEAD.zip>;
+   - завантажте KB4474419 і KB4490628 (Windows Server 2008 R2, x64) з Microsoft Update Catalog;
+   - у Провіднику відкрийте `\\<IP VM>\SecLab` (вхід як `<VM>\Administrator`), скопіюйте туди ZIP, а файли `.msu` — у `updates`.
+3. **VM**: правою кнопкою по ZIP → *Extract All…* → `C:\SecLab`, потім запустіть:
+   ```cmd
+   powershell -ExecutionPolicy Bypass -File C:\SecLab\sec_journal_on-<коміт>\windows\lab\Test-LegacySysmon.ps1
+   ```
+   Запущений з репозиторію, скрипт збирає локальний пакет з `vendor\`, не потребує мережі, бере оновлення з `C:\SecLab\updates` і пише результати в `C:\SecLab\results`. Хост може прочитати результати через ту саму шару. `-SysmonVersion 10.2` і `-CollectOnly` працюють так само.
+
 ### Конфіг Sysmon
 
 SwiftOnSecurity `sysmonconfig-export.xml`, закріплений на коміті `1836897` (SHA256 у скрипті). Зверніть увагу: репозиторій не оновлювався з жовтня 2021. Щоб пізніше перейти на olafhartong/sysmon-modular, достатньо змінити `ConfigUrl` і `ConfigSha256` у `sources.ini`, код чіпати не потрібно.
@@ -317,7 +334,7 @@ done
 |---|---|---|
 | Синтаксис обох `.ps1`, PSScriptAnalyzer (Warning/Error) | pwsh 7 на Linux | чисто |
 | PowerShell 2.0: немає конструкцій PS3+ | grep + PSUseCompatibleSyntax | чисто |
-| Юніт-тести `tests/windows-unit.ps1`: налаштування, розбір auditpol з локалізованими назвами, JSON, планування розмірів, перевірка хешів, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логіка аудиту й журналів на підмінених auditpol/wevtutil, повторний запуск нічого не змінює | pwsh 7 | 72/72 |
+| Юніт-тести `tests/windows-unit.ps1`: налаштування, розбір auditpol з локалізованими назвами, JSON, планування розмірів, перевірка хешів, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логіка аудиту й журналів на підмінених auditpol/wevtutil, повторний запуск нічого не змінює | pwsh 7 | 81/81 |
 | `tests/linux-docker.sh`: check → apply → повторний apply без змін | Ubuntu 24.04 і 20.04 зі справжнім auditd; Debian 12 і Rocky 9 із заглушкою auditctl (дзеркала пакетів були недоступні з пісочниці) | успішно |
 | Завантаження згенерованих правил auditd у справжнє ядро | privileged-контейнер | прийнято 57/57 правил |
 | Встановлення sysmonforlinux з packages.microsoft.com | Ubuntu 22.04 | встановлюється (1.5.3) |

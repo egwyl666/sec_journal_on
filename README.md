@@ -18,6 +18,7 @@ windows/Install-SecLogging.ps1    automation: download -> build package -> insta
 linux/set-security-logging.sh     single script for Linux (Debian/Ubuntu, RHEL/Rocky/Alma, SUSE)
 linux/install.sh                  automation: offline bundle (build) and install (online or --from)
 vendor/sysmon/10.42, 10.2/        Sysmon for Windows 7 / 2008 / 2008 R2 (verified, pinned)
+vendor/sysmon-config/             SwiftOnSecurity configs for those versions (CC BY 4.0, pinned)
 windows/lab/Test-LegacySysmon.ps1 lab test of legacy Sysmon in a VM (one command)
 wazuh/shared/<group>/agent.conf   centralized log collection for Wazuh manager groups
 tests/                            tests (pwsh + docker)
@@ -249,6 +250,22 @@ The PowerShell 2.0 engine predates all the protection mechanisms. It has **no** 
    powershell -ExecutionPolicy Bypass -File \\192.168.80.1\SecLab\lab\Test-LegacySysmon.ps1 -SysmonVersion 10.2
    ```
 
+**Without admin rights on the host.** The host then only needs a browser, and the VM, where you are the administrator, does the rest:
+
+1. **VM** (elevated `cmd`): create a share for the files and show the VM's IP address.
+   ```cmd
+   mkdir C:\SecLab\updates & net share SecLab=C:\SecLab /grant:Everyone,FULL & icacls C:\SecLab /grant Everyone:(OI)(CI)F & netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes & ipconfig
+   ```
+2. **Host** (browser, no admin):
+   - download the repository ZIP: <https://github.com/egwyl666/sec_journal_on/archive/HEAD.zip>;
+   - download KB4474419 and KB4490628 (Windows Server 2008 R2, x64) from the Microsoft Update Catalog;
+   - in Explorer, open `\\<VM IP>\SecLab` (log in as `<VM>\Administrator`), copy the ZIP there and the `.msu` files into `updates`.
+3. **VM**: right-click the ZIP → *Extract All…* → `C:\SecLab`, then run:
+   ```cmd
+   powershell -ExecutionPolicy Bypass -File C:\SecLab\sec_journal_on-<commit>\windows\lab\Test-LegacySysmon.ps1
+   ```
+   Started from the repository, the script builds a local package from `vendor\`, needs no network, reads updates from `C:\SecLab\updates` and writes results to `C:\SecLab\results`. The host can read the results from the same share. `-SysmonVersion 10.2` and `-CollectOnly` work the same way.
+
 ### Sysmon config
 
 SwiftOnSecurity `sysmonconfig-export.xml`, pinned to commit `1836897` (SHA256 in the script). Note that the repository has not been updated since October 2021. To switch to olafhartong/sysmon-modular later, change `ConfigUrl` and `ConfigSha256` in `sources.ini`; no code changes are needed.
@@ -317,7 +334,7 @@ Alerts worth creating right away:
 |---|---|---|
 | Syntax of both `.ps1` files, PSScriptAnalyzer (Warning/Error) | pwsh 7 on Linux | clean |
 | PowerShell 2.0: no PS3+ constructs | grep + PSUseCompatibleSyntax | clean |
-| Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op | pwsh 7 | 72/72 |
+| Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op | pwsh 7 | 81/81 |
 | `tests/linux-docker.sh`: check → apply → second apply with no changes | Ubuntu 24.04 and 20.04 with real auditd; Debian 12 and Rocky 9 with a stub auditctl (package mirrors were unreachable from the sandbox) | pass |
 | Generated auditd rules loaded into a real kernel | privileged container | 57/57 rules accepted |
 | Installing sysmonforlinux from packages.microsoft.com | Ubuntu 22.04 | installs (1.5.3) |

@@ -1014,12 +1014,15 @@ function Invoke-BuildPackage {
     $configs = @(@{ Url = $pins.ConfigUrl; Pin = $pins.ConfigSha256; Rel = 'sysmonconfig-export.xml' })
     foreach ($lv in @('10.42', '10.2')) {
         $lk = Get-LegacyKey $lv
-        $configs += @{ Url = $pins["${lk}ConfigUrl"]; Pin = $pins["${lk}ConfigSha256"]; Rel = "legacy\$lv\sysmonconfig-export.xml" }
+        $configs += @{ Url = $pins["${lk}ConfigUrl"]; Pin = $pins["${lk}ConfigSha256"]; Rel = "legacy\$lv\sysmonconfig-export.xml"; Vendor = (Join-Path $ScriptDir "..\vendor\sysmon-config\$lv\sysmonconfig-export.xml") }
     }
     foreach ($c in $configs) {
         $dst = Join-Path $OutDir $c.Rel
-        Write-Host "Завантаження $($c.Url)"
-        Save-Download $c.Url $dst
+        if ($c.Vendor -and (Test-Path -LiteralPath $c.Vendor)) { Copy-Item -LiteralPath $c.Vendor -Destination $dst -Force }
+        else {
+            Write-Host "Завантаження $($c.Url)"
+            Save-Download $c.Url $dst
+        }
         $h = Get-FileSha256 $dst
         if ($h -ne $c.Pin) { throw "$($c.Rel): хеш $h не збігається із закріпленим $($c.Pin)" }
         Write-Host "  $($c.Rel) sha256: OK"
