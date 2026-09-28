@@ -30,6 +30,7 @@ function Import-ScriptFunctions {
 }
 Import-ScriptFunctions $main
 Import-ScriptFunctions $gpo
+$installer = Join-Path $root 'windows/Install-SecLogging.ps1'
 
 Write-Host 'Налаштування (через -ExportSettings)'
 $s = & $main -ExportSettings
@@ -201,6 +202,40 @@ $global:Calls = @(); $Script:Counts = @{ OK = 0; Changed = 0; WouldChange = 0; W
 Invoke-Channels $s2 'Server' @{ SystemDriveFreeMB = 100000 }
 Assert (@($global:Calls | Where-Object { $_[0] -eq 'wevtutil.exe' }).Count -eq 0 -and $Script:Counts.WouldChange -eq 1) 'AuditOnly нічого не викликає'
 $global:AuditOnly = $false
+
+Write-Host 'Sysmon 10.42 з репозиторію (vendor)'
+$vendorZip = Join-Path $root 'vendor/sysmon/10.42/Sysmon.zip'
+Assert (Test-Path -LiteralPath $vendorZip) 'vendor/sysmon/10.42/Sysmon.zip існує'
+Assert ((Get-FileSha256 $vendorZip) -eq $s.Pins.LegacySysmonZipSha256) 'хеш vendor-архіву збігається із закріпленим у скрипті'
+Assert ($s.Pins.LegacySysmonZipUrl -like '*/vendor/sysmon/10.42/Sysmon.zip') 'URL legacy-архіву вказує на vendor'
+Assert ($s.Pins.LegacySysmonVersion -eq '10.42') 'версія legacy Sysmon 10.42'
+
+Write-Host 'Install-SecLogging: допоміжні функції'
+Import-ScriptFunctions $installer
+Assert ((Get-ArchiveUrl 'egwyl666' 'sec_journal_on' 'HEAD') -eq 'https://github.com/egwyl666/sec_journal_on/archive/HEAD.zip') 'URL архіву репозиторію'
+$a = Add-SwitchArgs @('-SourcePath', 'X') @{ AuditOnly = [switch]$true; SkipSysmon = [switch]$false; TranscriptionPath = ''; LinkTargets = @('OU=A,DC=c,DC=l', 'OU=B,DC=c,DC=l') } @('AuditOnly', 'SkipSysmon', 'TranscriptionPath', 'LinkTargets')
+Assert (($a -join ' ') -eq '-SourcePath X -AuditOnly -LinkTargets OU=A,DC=c,DC=l;OU=B,DC=c,DC=l') 'аргументи: лише увімкнені перемикачі, DN через ";"'
+$tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ('src-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path (Join-Path $tmpRoot 'sec_journal_on-HEAD/windows') -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $tmpRoot 'sec_journal_on-HEAD/windows/Set-SecurityLogging.ps1') -Value '#'
+Assert ((Find-SourceRoot $tmpRoot) -eq (Join-Path $tmpRoot 'sec_journal_on-HEAD')) 'корінь розпакованого архіву знайдено'
+Remove-Item -LiteralPath $tmpRoot -Recurse -Force
+$pkg2 = Join-Path ([IO.Path]::GetTempPath()) ('pkg2-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path (Join-Path $pkg2 'legacy') -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $pkg2 'Set-SecurityLogging.ps1') -Value '#'
+foreach ($f in 'Sysmon.zip', 'sysmonconfig-export.xml', 'legacy/sysmonconfig-export.xml') { Set-Content -LiteralPath (Join-Path $pkg2 $f) -Value $f -NoNewline }
+Copy-Item -LiteralPath $vendorZip -Destination (Join-Path $pkg2 'legacy/Sysmon.zip')
+$ini2 = @("SysmonZipSha256=$(Get-FileSha256 (Join-Path $pkg2 'Sysmon.zip'))", "ConfigSha256=$(Get-FileSha256 (Join-Path $pkg2 'sysmonconfig-export.xml'))", "LegacySysmonZipSha256=$($s.Pins.LegacySysmonZipSha256)", "LegacyConfigSha256=$(Get-FileSha256 (Join-Path $pkg2 'legacy/sysmonconfig-export.xml'))")
+Set-Content -LiteralPath (Join-Path $pkg2 'sources.ini') -Value $ini2
+$t = Test-Package $pkg2 $true
+Assert ($t.Ok) "коректний пакет приймається [$($t.Problems -join '; ')]"
+Add-Content -LiteralPath (Join-Path $pkg2 'Sysmon.zip') -Value 'x'
+$t = Test-Package $pkg2 $true
+Assert ((-not $t.Ok) -and ($t.Problems -join ' ') -match 'Sysmon.zip: SHA256') 'змінений Sysmon.zip виявлено'
+Remove-Item -LiteralPath (Join-Path $pkg2 'legacy/Sysmon.zip')
+$t = Test-Package $pkg2 $false
+Assert ($t.Ok -or ($t.Problems -join ' ') -notmatch 'legacy') 'без Sysmon legacy-файли не обов''язкові'
+Remove-Item -LiteralPath $pkg2 -Recurse -Force
 
 Write-Host ''
 Write-Host "Пройдено: $script:passed  Не пройдено: $script:failed"

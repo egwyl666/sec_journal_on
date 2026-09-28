@@ -30,6 +30,7 @@
 
 .PARAMETER LinkTargets
     Distinguished names, до яких прив'язати базову GPO. За замовчуванням: корінь домену.
+    Кілька DN можна передати масивом або одним рядком через ';'.
 
 .PARAMETER SkipSysmon
     Startup-скрипт запускається з -SkipSysmon (лише журнали/аудит).
@@ -215,6 +216,8 @@ $domain = Get-ADDomain
 $domainDns = $domain.DNSRoot
 $domainDn = $domain.DistinguishedName
 $dcName = $env:COMPUTERNAME
+# Кілька DN можна передати одним рядком через ';' (DN самі містять коми)
+$LinkTargets = @($LinkTargets | ForEach-Object { $_ -split ';' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if (-not $LinkTargets) { $LinkTargets = @($domainDn) }
 $dcOu = $domain.DomainControllersContainer
 

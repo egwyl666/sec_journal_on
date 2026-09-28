@@ -14,13 +14,73 @@
 ```
 windows/Set-SecurityLogging.ps1   єдиний скрипт для будь-якої Windows (WS / Server / DC), PowerShell 2.0+
 windows/New-SecLoggingGpo.ps1     надбудова GPO для домену (запускати на DC)
+windows/Install-SecLogging.ps1    автоматизація: завантажити -> зібрати пакет -> встановити / шара / GPO
 linux/set-security-logging.sh     єдиний скрипт для Linux (Debian/Ubuntu, RHEL/Rocky/Alma, SUSE)
+linux/install.sh                  автоматизація: офлайн-комплект (build) і встановлення (онлайн або --from)
+vendor/sysmon/10.42/              Sysmon 10.42 для Windows 7 / 2008 / 2008 R2 (перевірено, хеш закріплено)
 wazuh/shared/<група>/agent.conf   централізований збір журналів для груп менеджера Wazuh
 tests/                            тести (pwsh + docker)
 ```
 
 > Довідка, коментарі та повідомлення в консолі всередині скриптів — українською. Машиночитані значення залишені англійською: статуси (`OK`, `Changed`, `WouldChange`, `Warning`, `Error`, `Skipped`), ключі JSON, назви параметрів і журналів. Так простіше писати правила й фільтри в SIEM.
 > Файли `.ps1` збережено в **UTF-8 з BOM**. Без BOM Windows PowerShell 5.1/2.0 неправильно читає кирилицю. Якщо редагуєте скрипти, зберігайте BOM.
+
+## Швидкий старт (автоматично)
+
+Установники роблять «завантажити → зібрати пакет → встановити» однією командою. Окремі кроки нижче виконувати не обов'язково, якщо не хочете.
+
+**Windows** (PowerShell від адміністратора):
+
+```powershell
+# машина з інтернетом: завантажити установник з GitHub і запустити (вставити в PowerShell)
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
+$f = "$env:TEMP\Install-SecLogging.ps1"
+(New-Object Net.WebClient).DownloadFile('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Install-SecLogging.ps1', $f)
+powershell -ExecutionPolicy Bypass -File $f -Fetch -AuditOnly
+
+# з клону репозиторію (спершу дозволити скрипти лише в цьому вікні;
+# для ZIP, завантаженого з GitHub, також зняти позначку "завантажено з інтернету")
+Set-ExecutionPolicy -Scope Process Bypass -Force
+Get-ChildItem -Recurse | Unblock-File
+.\windows\Install-SecLogging.ps1 -AuditOnly                                 # лише перевірка
+.\windows\Install-SecLogging.ps1                                            # зібрати пакет + встановити тут
+.\windows\Install-SecLogging.ps1 -Mode Build -UpdateRepoPins                # лише зібрати, записати windows\sources.ini
+.\windows\Install-SecLogging.ps1 -Mode Share -SharePath \\fileserver\SecLogging  # викласти для машин без інтернету
+.\windows\Install-SecLogging.ps1 -Mode Domain -WhatIfGpo                    # на DC1: пакет + пробний прогін GPO
+.\windows\Install-SecLogging.ps1 -Mode Domain -SetDomainRootSacl            # на DC1: пакет + GPO
+```
+
+| Режим | Що робить |
+|---|---|
+| `Local` (за замовчуванням) | за потреби збирає пакет (`%ProgramData%\SecLogging\package`), потім запускає на цій машині `Set-SecurityLogging.ps1 -SourcePath <пакет>` |
+| `Build` | лише збирає пакет; `-UpdateRepoPins` копіює новий `sources.ini` у `windows\` клону, щоб його закомітити |
+| `Share` | збирає пакет і копіює його в `-SharePath`, повторно перевіряючи кожен хеш на шарі |
+| `Domain` | збирає пакет і запускає з ним `New-SecLoggingGpo.ps1` (`-WhatIfGpo` — пробний прогін, `-LinkTargets`, `-SetDomainRootSacl`) |
+
+- Коректний пакет використовується повторно. `-Rebuild` збирає його заново, а `-NoBuild` на машині без інтернету бере лише наявний пакет.
+- `-Fetch` завантажує скрипти архівом з GitHub (`-RepoRef` — гілка/тег/коміт, типово `HEAD`).
+- Усі параметри `Set-SecurityLogging.ps1` (`-AuditOnly`, `-SkipSysmon`, `-UpgradeSysmon`, `-DisablePowerShellV2`, `-ConfigureWazuh`, `-AllowLegacySysmon`, `-TranscriptionPath`, …) передаються далі.
+
+**Linux** (root):
+
+```bash
+# одним рядком на хості з інтернетом
+curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh -o install.sh && sudo bash install.sh --fetch --check
+
+# з клону
+sudo ./linux/install.sh --check                      # лише перевірка
+sudo ./linux/install.sh --configure-wazuh            # встановити онлайн
+sudo ./linux/install.sh build --with-sysmon          # офлайн-комплект для цього дистрибутива/версії/архітектури
+sudo ./seclogging-bundle-*/install.sh --from ./seclogging-bundle-ubuntu-22.04-x86_64 --with-sysmon   # на хості без інтернету
+```
+
+`build` створює теку комплекту, у якій:
+- обидва скрипти;
+- пакети `auditd` і `sysmon` разом із **повним деревом залежностей**;
+- `SHA256SUMS`;
+- `bundle.info` — для якого дистрибутива, версії й архітектури зібрано комплект.
+
+`install --from` перевіряє `SHA256SUMS` і відмовляється працювати зі зміненим комплектом. Він встановлює лише відсутні на хості або старіші пакети й ніколи не відкочує версії, а потім запускає `set-security-logging.sh`. Збирайте комплект на тому самому дистрибутиві, версії та архітектурі, що й цільові хости. Інші параметри (`--check`, `--configure-wazuh`, `--profile`, `--immutable`, …) передаються в `set-security-logging.sh`.
 
 ---
 
@@ -148,9 +208,10 @@ type C:\ProgramData\SecLogging\last-report.json   :: після перезава
 ### Старі системи (2008 / 2008 R2 / Win7)
 
 * Журнали, аудит і реєстр налаштовуються. Скрипт працює з PowerShell 2.0 і .NET 3.5.
-* **Sysmon за замовчуванням не встановлюється.** Сучасний Sysmon не підтримує NT 6.0/6.1, відомі зависання і BSOD. Стабільною для 2008 R2 вважається версія **10.42**. Microsoft її більше не роздає, архів доведеться знайти самостійно.
-  * Зібрати пакет: `-BuildPackage D:\SecLogging -LegacySysmonZip D:\Sysmon-10.42.zip`. Підпис перевіряється, хеш закріплюється.
+* **Sysmon за замовчуванням не встановлюється.** Сучасний Sysmon не підтримує NT 6.0/6.1, відомі зависання і BSOD. Стабільною для 2008 R2 вважається версія **10.42**. Microsoft її більше не роздає, тому вона **зберігається в цьому репозиторії**: `vendor/sysmon/10.42/Sysmon.zip`. Підпис Microsoft перевірено, походження та хеші — у [vendor/sysmon/README.md](vendor/sysmon/README.md).
+  * `-BuildPackage` автоматично кладе її в пакет як `legacy\Sysmon.zip`, а її хеш закріплено в скрипті. Хости з інтернетом можуть також завантажити її прямо з репозиторію. Щоб узяти іншу збірку, передайте `-LegacySysmonZip <шлях>`.
   * Встановлення: `-AllowLegacySysmon`. Старі хости отримують **старий конфіг SwiftOnSecurity зі схемою 4.22**, бо поточний потребує Sysmon 13+. Його хеш уже закріплено в скрипті.
+  * **Чому не 10.2:** Sysmon 10.0/10.2 підтримують схеми конфігу лише до 4.21. SwiftOnSecurity ніколи не публікував конфіг під 4.21 (в історії після 4.00 одразу 4.22), тож 10.2 не прийме наш конфіг. 10.4x підтримує 4.22. [SwiftOnSecurity/sysmon-config#103](https://github.com/SwiftOnSecurity/sysmon-config/issues/103) показує, що 10.42 завантажує цей конфіг на Windows 7 («Configuration file validated»). Сам issue — про те, що не спрацювало власне виключення, а не про стабільність, і він досі відкритий.
   * На 2008 R2 драйверу потрібні оновлення SHA-2: KB4474419 і KB4490628.
   * **Спершу на одному хості.**
 * Командний рядок у 4688 на 2008 R2 з'являється лише з KB3004375.
@@ -223,15 +284,20 @@ done
 |---|---|---|
 | Синтаксис обох `.ps1`, PSScriptAnalyzer (Warning/Error) | pwsh 7 на Linux | чисто |
 | PowerShell 2.0: немає конструкцій PS3+ | grep + PSUseCompatibleSyntax | чисто |
-| Юніт-тести `tests/windows-unit.ps1`: налаштування, розбір auditpol з локалізованими назвами, JSON, планування розмірів, перевірка хешів, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логіка аудиту й журналів на підмінених auditpol/wevtutil, повторний запуск нічого не змінює | pwsh 7 | 56/56 |
+| Юніт-тести `tests/windows-unit.ps1`: налаштування, розбір auditpol з локалізованими назвами, JSON, планування розмірів, перевірка хешів, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логіка аудиту й журналів на підмінених auditpol/wevtutil, повторний запуск нічого не змінює | pwsh 7 | 66/66 |
 | `tests/linux-docker.sh`: check → apply → повторний apply без змін | Ubuntu 24.04 і 20.04 зі справжнім auditd; Debian 12 і Rocky 9 із заглушкою auditctl (дзеркала пакетів були недоступні з пісочниці) | успішно |
 | Завантаження згенерованих правил auditd у справжнє ядро | privileged-контейнер | прийнято 57/57 правил |
 | Встановлення sysmonforlinux з packages.microsoft.com | Ubuntu 22.04 | встановлюється (1.5.3) |
+| `tests/linux-bundle.sh`: `install.sh build` → встановлення з комплекту на чистий контейнер **без мережі** → повторний запуск без змін → змінений комплект відхилено | Ubuntu 22.04 (із Sysmon), Ubuntu 24.04 | успішно |
+| `install.sh --fetch` завантажує основний скрипт з GitHub | Ubuntu 24.04 | успішно |
+| Sysmon 10.42 у `vendor/`: Authenticode (Microsoft, дійсний на момент мітки часу), FileVersion, закріплений хеш | osslsigncode + юніт-тест | успішно |
 
 **Ще не перевірено (потрібен реальний стенд):**
 - увесь Windows-код, що звертається до ОС: wevtutil, auditpol, встановлення Sysmon, реєстр, DISM;
 - `New-SecLoggingGpo.ps1` на справжньому AD/SYSVOL;
-- робота на Server 2008/R2;
+- робота на Server 2008/R2, зокрема Sysmon 10.42 там;
+- `Install-SecLogging.ps1` на справжній Windows (юніт-тестами покрито лише його допоміжні функції);
+- `linux/install.sh build` на сімействі RHEL (дзеркала пакетів були недоступні з пісочниці);
 - Sysmon for Linux на хості з systemd (у контейнері sysmon приймає будь-який конфіг без перевірки).
 
 Рекомендований порядок:
@@ -243,4 +309,5 @@ done
 ```bash
 pwsh -NoProfile -File tests/windows-unit.ps1
 ./tests/linux-docker.sh          # IMAGES="ubuntu:24.04 debian:12" щоб вибрати образи
+./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 WITH_SYSMON=1
 ```
