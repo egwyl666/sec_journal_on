@@ -41,7 +41,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointMan
 **Linux** (будь-який дистрибутив із таблиці нижче):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh | sudo bash
+(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh) | sudo bash
 ```
 
 Що відбувається:
@@ -68,7 +68,7 @@ curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; $w=New-Object Net.WebClient; $w.Encoding=[Text.Encoding]::UTF8; & ([scriptblock]::Create($w.DownloadString('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1').TrimStart([char]0xFEFF))) -AuditOnly"
 ```
 ```bash
-curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh | sudo bash -s -- --check
+(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh) | sudo bash -s -- --check
 ```
 
 Машина без інтернету: завантажте `https://github.com/egwyl666/sec_journal_on/archive/HEAD.zip` на іншому комп'ютері, перенесіть і запустіть `powershell -ExecutionPolicy Bypass -File <розпаковано>\windows\Start-SecLogging.ps1 -Source <шлях до zip>` (Linux: офлайн-комплект, див. нижче).

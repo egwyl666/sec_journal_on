@@ -2,8 +2,9 @@
 # install.sh - автоматизація "завантажити -> зібрати комплект -> встановити" для Linux.
 #
 # Одна команда (root, потрібен інтернет):
-#   curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh | sudo bash
-#   (або: wget -qO- ... | sudo bash)
+#   (curl -fsSL URL 2>/dev/null || wget -qO- URL) | sudo bash
+#   де URL = https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh
+#   (працює і там, де є лише curl - мінімальні RHEL, і де лише wget - Ubuntu Desktop)
 # Знімає стан "до" і "після" і записує, що змінилося: /var/log/seclogging/changes/<час>-changes.txt
 #
 # Використання:
