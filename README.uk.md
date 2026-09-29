@@ -14,8 +14,9 @@
 ```
 windows/Set-SecurityLogging.ps1   єдиний скрипт для будь-якої Windows (WS / Server / DC), PowerShell 2.0+
 windows/New-SecLoggingGpo.ps1     надбудова GPO для домену (запускати на DC)
+windows/Start-SecLogging.ps1      одна команда для будь-кого: завантажити, визначити, налаштувати, звіт до/після
 windows/Install-SecLogging.ps1    автоматизація: завантажити -> зібрати пакет -> встановити / шара / GPO
-linux/set-security-logging.sh     єдиний скрипт для Linux (Debian/Ubuntu, RHEL/Rocky/Alma, SUSE)
+linux/set-security-logging.sh     єдиний скрипт для будь-якого Linux (сімейства deb, rpm, SUSE, Arch, Alpine; див. таблицю)
 linux/install.sh                  автоматизація: офлайн-комплект (build) і встановлення (онлайн або --from)
 vendor/sysmon/10.42, 10.2/        Sysmon для Windows 7 / 2008 / 2008 R2 (перевірено, хеш закріплено)
 vendor/sysmon-config/             конфіги SwiftOnSecurity для цих версій (CC BY 4.0, хеш закріплено)
@@ -27,6 +28,77 @@ tests/                            тести (pwsh + docker)
 > Довідка, коментарі та повідомлення в консолі всередині скриптів — українською. Машиночитані значення залишені англійською: статуси (`OK`, `Changed`, `WouldChange`, `Warning`, `Error`, `Skipped`), ключі JSON, назви параметрів і журналів. Так простіше писати правила й фільтри в SIEM.
 > Файли `.ps1` збережено в **UTF-8 з BOM**. Без BOM Windows PowerShell 5.1/2.0 неправильно читає кирилицю. Якщо редагуєте скрипти, зберігайте BOM.
 
+## Одна команда (без роздумів)
+
+Відкрийте **PowerShell або cmd від імені адміністратора** (Windows; той самий рядок працює в обох) чи root-консоль (Linux), вставте один рядок і дочекайтеся `ГОТОВО`. Потрібен інтернет.
+
+**Windows** (10/11, Server 2008 R2 … 2025, контролери домену):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
+```
+
+**Linux** (будь-який дистрибутив із таблиці нижче; рядок використовує `curl`, а де його немає — `wget`, наприклад на Ubuntu Desktop):
+
+```bash
+(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/linux/install.sh) | sudo bash
+```
+
+Що відбувається:
+
+1. Скрипти завантажуються з GitHub.
+2. Визначається тип машини: робоча станція, сервер, контролер домену, стара ОС (2008 / 2008 R2 / Win7), дистрибутив Linux.
+3. Зберігається знімок поточного стану («до»).
+4. Вмикається все, чого бракує: журнали та їхні розміри, політика аудиту, журналювання PowerShell, Sysmon (Windows), auditd і journald (Linux), збір агентом Wazuh, якщо він встановлений. На **контролері домену** додатково створюються доменні GPO, щоб кожна машина домену налаштовувалася сама при завантаженні, і вмикається аудит DCSync.
+5. Зберігається другий знімок («після») і **записується все, що змінилося, у вигляді «було → стало»**.
+
+Результати:
+
+| | Windows | Linux |
+|---|---|---|
+| Що змінилося (було → стало) | `C:\ProgramData\SecLogging\changes\<час>-changes.txt` (+ `.csv` для Excel) | `/var/log/seclogging/changes/<час>-changes.txt` |
+| Повні знімки | `...\changes\<час>-before.tsv`, `<час>-after.tsv` | та сама тека |
+| Детальний звіт | `C:\ProgramData\SecLogging\last-report.json` | `/var/log/seclogging/last-report.json` |
+
+Повторний запуск безпечний: змінюється лише те, чого бракує, і повторний запуск покаже `Змін немає`.
+
+Подивитися, що змінилося після запуску:
+
+```powershell
+# Windows (PowerShell)
+Get-Content (Get-ChildItem C:\ProgramData\SecLogging\changes\*-changes.txt | Sort-Object LastWriteTime | Select-Object -Last 1).FullName -Encoding UTF8
+```
+```bash
+# Linux
+sudo sh -c 'cat "$(ls -t /var/log/seclogging/changes/*-changes.txt | head -1)"'
+```
+
+Приклад (Ubuntu, перший запуск):
+
+```
+[auditd.conf]
+  max_log_file
+      було:  (не задано)
+      стало: 100
+```
+
+Лише перевірка, нічого не змінювати:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF))) -AuditOnly"
+```
+```bash
+(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/linux/install.sh) | sudo bash -s -- --check
+```
+
+Машина без інтернету: завантажте `https://github.com/egwyl666/sec_journal_on/archive/refs/tags/v1.3.0.zip` на іншому комп'ютері, перенесіть і запустіть `powershell -ExecutionPolicy Bypass -File <розпаковано>\windows\Start-SecLogging.ps1 -Source <шлях до zip>` (Linux: офлайн-комплект, див. нижче).
+
+Порівняти будь-які два знімки пізніше: `Set-SecurityLogging.ps1 -CompareBefore a.tsv -CompareAfter b.tsv -CompareOut changes.txt` / `set-security-logging.sh --compare a.tsv b.tsv`.
+
+### Версії та оновлення
+
+Команди вище закріплені на **релізі** (`v1.3.0`), а не на останньому коміті: зміна в репозиторії не потрапить на машини, доки не вийде новий реліз, і зламана гілка не зможе розіслати код на всі машини. Щоб розгорнути новий реліз, замініть у команді `v1.3.0` на новий тег. `-Ref HEAD` (Windows) / `-s -- --ref HEAD` (Linux) запускає останню версію з розробки для перевірки.
+
 ## Швидкий старт (автоматично)
 
 Установники роблять «завантажити → зібрати пакет → встановити» однією командою. Окремі кроки нижче виконувати не обов'язково, якщо не хочете.
@@ -37,7 +109,7 @@ tests/                            тести (pwsh + docker)
 # машина з інтернетом: завантажити установник з GitHub і запустити (вставити в PowerShell)
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
 $f = "$env:TEMP\Install-SecLogging.ps1"
-(New-Object Net.WebClient).DownloadFile('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Install-SecLogging.ps1', $f)
+(New-Object Net.WebClient).DownloadFile('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/windows/Install-SecLogging.ps1', $f)
 powershell -ExecutionPolicy Bypass -File $f -Fetch -AuditOnly
 
 # з клону репозиторію (спершу дозволити скрипти лише в цьому вікні;
@@ -60,25 +132,25 @@ Get-ChildItem -Recurse | Unblock-File
 | `Domain` | збирає пакет і запускає з ним `New-SecLoggingGpo.ps1` (`-WhatIfGpo` — пробний прогін, `-LinkTargets`, `-SetDomainRootSacl`) |
 
 - Коректний пакет використовується повторно. `-Rebuild` збирає його заново, а `-NoBuild` на машині без інтернету бере лише наявний пакет.
-- `-Fetch` завантажує скрипти архівом з GitHub (`-RepoRef` — гілка/тег/коміт, типово `HEAD`).
+- `-Fetch` завантажує скрипти архівом з GitHub (`-RepoRef` — гілка/тег/коміт, типово закріплений реліз `v1.3.0`).
 - Усі параметри `Set-SecurityLogging.ps1` (`-AuditOnly`, `-SkipSysmon`, `-UpgradeSysmon`, `-DisablePowerShellV2`, `-ConfigureWazuh`, `-AllowLegacySysmon`, `-LegacySysmonVersion`, `-ReinstallSysmon`, `-TranscriptionPath`, …) передаються далі.
 
 **Linux** (root):
 
 ```bash
 # одним рядком на хості з інтернетом
-curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh -o install.sh && sudo bash install.sh --fetch --check
+curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/linux/install.sh -o install.sh && sudo bash install.sh --fetch --check
 
 # з клону
 sudo ./linux/install.sh --check                      # лише перевірка
 sudo ./linux/install.sh --configure-wazuh            # встановити онлайн
-sudo ./linux/install.sh build --with-sysmon          # офлайн-комплект для цього дистрибутива/версії/архітектури
-sudo ./seclogging-bundle-*/install.sh --from ./seclogging-bundle-ubuntu-22.04-x86_64 --with-sysmon   # на хості без інтернету
+sudo ./linux/install.sh build                        # офлайн-комплект для цього дистрибутива/версії/архітектури
+sudo ./seclogging-bundle-*/install.sh --from ./seclogging-bundle-ubuntu-22.04-x86_64   # на хості без інтернету
 ```
 
 `build` створює теку комплекту, у якій:
 - обидва скрипти;
-- пакети `auditd` і `sysmon` разом із **повним деревом залежностей**;
+- пакет `auditd` разом із **повним деревом залежностей**;
 - `SHA256SUMS`;
 - `bundle.info` — для якого дистрибутива, версії й архітектури зібрано комплект.
 
@@ -179,7 +251,7 @@ type C:\ProgramData\SecLogging\last-report.json   :: після перезава
 **Журнали.** Вимкнені журнали вмикаються. Розміри тільки ростуть. Режим — *Overwrite events as needed*, тож журнали ніколи не зупиняються і не забивають диск.
 
 | Клас | Журнали | WS | Server | DC |
-|---|---|---|---|---|
+|---|---|---|---|
 | Security | Security | 768 МБ | 1,5 ГБ | 3 ГБ |
 | Sysmon | Microsoft-Windows-Sysmon/Operational | 512 МБ | 1 ГБ | 1,5 ГБ |
 | PowerShell | PowerShell/Operational, Windows PowerShell, PowerShellCore/Operational | 384 МБ | 768 МБ | 1 ГБ |
@@ -197,7 +269,11 @@ type C:\ProgramData\SecLogging\last-report.json   :: після перезава
 - `ProcessCreationIncludeCmdLine_Enabled=1`;
 - ScriptBlock і Module logging (`*`) для Windows PowerShell і PowerShell 7;
 - `AuditReceivingNTLMTraffic=2`, `RestrictSendingNTLMTraffic=1` (лише аудит);
-- на DC — `AuditNTLMInDomain=7` і `16 LDAP Interface Events=2`.
+- на DC — `AuditNTLMInDomain=7` і `16 LDAP Interface Events=2`;
+- `Image File Execution Options\LSASS.exe\AuditLevel=8`: події 3065/3066 у CodeIntegrity/Operational, коли в LSASS намагається завантажитися непідписаний модуль (лише аудит, нічого не блокується);
+- на центрі сертифікації AD CS — `AuditFilter=127` (без нього CA нічого не пише; діє після перезапуску `certsvc`).
+
+**Синхронізація часу** лише перевіряється, не змінюється: `NoSync` або вимкнена служба W32Time дають попередження, бо події з різних машин неможливо зіставити, коли годинники розходяться.
 
 ### PowerShell 2.0: навіщо вимикати
 
@@ -205,7 +281,7 @@ type C:\ProgramData\SecLogging\last-report.json   :: після перезава
 
 * **Win10/11 і Server 2016+:** компонент `MicrosoftWindowsPowerShellV2(Root)` є, але майже нікому не потрібен. У Win11 24H2 і Server 2025 його вже прибрала сама Microsoft. Ламається лише дуже старе ПЗ, яке явно викликає `-Version 2`, наприклад старі скрипти Exchange 2010 чи SCCM.
 * **2008/2008 R2:** 2.0 — основний PowerShell, видалити його неможливо. Скрипт це враховує.
-* **За замовчуванням** скрипт лише **попереджає**. Видаляє компонент тільки з параметром `-DisablePowerShellV2`. Спершу пройдіться по машинах з `-AuditOnly` і подивіться, на скількох він увімкнений.
+* **За замовчуванням** запуск однією командою (`Start-SecLogging.ps1` і доменна GPO, яку він створює) **видаляє** компонент на Win8/2012 і новіших; `-KeepPowerShellV2` залишає його. Сам `Set-SecurityLogging.ps1` без `-DisablePowerShellV2` лише попереджає.
 
 ### Старі системи (2008 / 2008 R2 / Win7)
 
@@ -257,7 +333,7 @@ type C:\ProgramData\SecLogging\last-report.json   :: після перезава
    mkdir C:\SecLab\updates & net share SecLab=C:\SecLab /grant:Everyone,FULL & icacls C:\SecLab /grant Everyone:(OI)(CI)F & netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes & ipconfig
    ```
 2. **Хост** (браузер, без прав адміністратора):
-   - завантажте ZIP репозиторію: <https://github.com/egwyl666/sec_journal_on/archive/HEAD.zip>;
+   - завантажте ZIP репозиторію: <https://github.com/egwyl666/sec_journal_on/archive/refs/tags/v1.3.0.zip>;
    - завантажте KB4474419 і KB4490628 (Windows Server 2008 R2, x64) з Microsoft Update Catalog;
    - у Провіднику відкрийте `\\<IP VM>\SecLab` (вхід як `<VM>\Administrator`), скопіюйте туди ZIP, а файли `.msu` — у `updates`.
 3. **VM**: правою кнопкою по ZIP → *Extract All…* → `C:\SecLab`, потім запустіть:
@@ -277,27 +353,40 @@ SwiftOnSecurity `sysmonconfig-export.xml`, закріплений на комі�
 ```bash
 sudo ./linux/set-security-logging.sh --check          # лише звіт
 sudo ./linux/set-security-logging.sh                  # застосувати
-sudo ./linux/set-security-logging.sh --with-sysmon --configure-wazuh
+sudo ./linux/set-security-logging.sh --configure-wazuh
 ```
 
 | Що | Як |
 |---|---|
-| Визначення | `/etc/os-release` дає сімейство deb/rpm/suse. `graphical.target` означає робочу станцію, інакше — сервер. Також перевіряється, чи це контейнер, і вільне місце на `/var` |
+| Визначення | `/etc/os-release` (`ID`, потім `ID_LIKE`, тому похідні дистрибутиви теж розпізнаються), інакше — за наявним пакетним менеджером. Також визначає систему ініціалізації (systemd / OpenRC / SysV), контейнер і вільне місце на `/var`. `graphical.target` означає робочу станцію, інакше — сервер |
 | auditd | встановлює пакет. `auditd.conf`: `max_log_file` 50/100 МБ × `num_logs` 10, `ROTATE`, `ENRICHED` (auditd ≥ 2.6) |
 | Правила | `/etc/audit/rules.d/50-seclogging.rules`: облікові записи, sudoers, PAM, SSH, cron/at/systemd/rc/profile, ld.so.preload, модулі ядра, hostname, час, ptrace-ін'єкції, монтування, execve у сесіях користувачів (ключ `audit-wazuh-c` під стандартні правила Wazuh), execve від облікових записів веб-сервера (`webshell`). Рядки `-w` пишуться, лише якщо шлях існує. Якщо ввімкнено незмінний режим (`-e 2`), скрипт попереджає, що потрібне перезавантаження. `--immutable` сам додає `-e 2` |
 | journald | `Storage=persistent`, `SystemMaxUse` 1G (WS) / 2G (сервер) через drop-in, лише збільшення |
-| Auth-лог | перевіряє rsyslog і `/var/log/auth.log` / `/var/log/secure`, а також що logrotate зберігає не менше 7 днів |
-| Sysmon for Linux | `--with-sysmon`: встановлення з packages.microsoft.com (підписано GPG) або офлайн через `--sysmon-package-dir DIR` (потрібен файл `SHA256SUMS`). Вбудований конфіг: процеси, мережа без loopback, створення файлів у місцях закріплення |
+| Auth-лог | перевіряє rsyslog і фактичний auth-лог (`/var/log/auth.log`, `/var/log/secure`, інакше типовий для сімейства), а також що logrotate зберігає не менше 7 днів |
+| sshd | `LogLevel VERBOSE`, щоб у журнал автентифікації потрапляв відбиток ключа, яким увійшли. Drop-in `sshd_config.d/01-seclogging.conf`, якщо `Include` стоїть на початку `sshd_config`, інакше рядок на початок `sshd_config` (з резервною копією). `sshd -t` має пройти, інакше зміну скасовано; потім `reload` |
+| Час | перевіряє синхронізацію NTP (`timedatectl`, `chronyc`, `ntpstat`) і попереджає, якщо годинник не синхронізовано; нічого не змінює |
 | Wazuh | перевіряє агента і збір audit/auth-журналів. З `--configure-wazuh` дописує керований блок в `ossec.conf` |
 
 Звіт — у `/var/log/seclogging/last-report.json`, підсумковий рядок іде в syslog (тег `seclogging`).
 
-**Чи є сенс у Sysmon for Linux?** Помірний. Основою залишається auditd. Sysmon додає мережеві з'єднання з прив'язкою до процесу (через auditd це шумно й незручно) та спільну з Windows схему подій. Мінуси:
-- потрібен eBPF (ядро ≥ 4.15);
-- пакета немає в репозиторіях дистрибутива;
-- події приходять у syslog у вигляді XML, і **Wazuh потрібні додаткові декодери**.
+### Підтримувані дистрибутиви
 
-Тому за замовчуванням він вимкнений. Спершу увімкніть на кількох серверах і подивіться на обсяг подій.
+Один скрипт для всіх: він сам визначає, що це за хост, і вибирає пакетний менеджер, назви пакетів, шляхи журналів і команди служб. Про дистрибутив нічого вказувати не треба.
+
+| Сімейство | Дистрибутиви | Пакетний менеджер | Офлайн-комплект (`install.sh build`) |
+|---|---|---|---|
+| deb | Ubuntu, Debian, Mint, Astra, Pop!_OS, Kali та інші похідні | apt | так |
+| rpm | RHEL, CentOS 7/8/Stream, Rocky, Alma, Oracle, Fedora, Amazon Linux | dnf / yum | так |
+| suse | SLES, openSUSE Leap/Tumbleweed | zypper | ні (лише онлайн) |
+| arch | Arch, Manjaro, EndeavourOS | pacman | ні (лише онлайн) |
+| alpine | Alpine (OpenRC, потрібен `apk add bash`) | apk | ні (лише онлайн) |
+| інші | будь-що з `/etc/os-release` | немає | ні |
+
+На невідомому дистрибутиві auditd має бути вже встановлений. Тоді скрипт налаштує все інше, а замість встановлення пакетів покаже попередження.
+
+CentOS 7 і 8 більше не підтримуються: їхні типові репозиторії не працюють. Скрипт про це повідомляє і пропонує `vault.centos.org` або офлайн-комплект.
+
+**Чому без Sysmon for Linux.** Штатні засоби вже покривають головне: auditd записує запуск процесів з повним командним рядком і користувачем, зміни файлів і конфігурації, модулі ядра та підвищення привілеїв, а journald/syslog — входи, sudo і служби. Wazuh розбирає все це з коробки. Sysmon for Linux додав би ще один агент з eBPF-сенсором (ядро ≥ 4.15), пакети не з репозиторіїв дистрибутива і XML-події, які Wazuh не розбирає без власних декодерів.
 
 ---
 
@@ -334,21 +423,23 @@ done
 |---|---|---|
 | Синтаксис обох `.ps1`, PSScriptAnalyzer (Warning/Error) | pwsh 7 на Linux | чисто |
 | PowerShell 2.0: немає конструкцій PS3+ | grep + PSUseCompatibleSyntax | чисто |
-| Юніт-тести `tests/windows-unit.ps1`: налаштування, розбір auditpol з локалізованими назвами, JSON, планування розмірів, перевірка хешів, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логіка аудиту й журналів на підмінених auditpol/wevtutil, повторний запуск нічого не змінює | pwsh 7 | 81/81 |
-| `tests/linux-docker.sh`: check → apply → повторний apply без змін | Ubuntu 24.04 і 20.04 зі справжнім auditd; Debian 12 і Rocky 9 із заглушкою auditctl (дзеркала пакетів були недоступні з пісочниці) | успішно |
+| Юніт-тести `tests/windows-unit.ps1`: налаштування, розбір auditpol з локалізованими назвами, JSON, планування розмірів, перевірка хешів, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логіка аудиту й журналів на підмінених auditpol/wevtutil, повторний запуск нічого не змінює, запасні шляхи PowerShell 2.0 | pwsh 7 | 134/134 |
+| `tests/linux-docker.sh`: check → apply → повторний apply без змін | Ubuntu 24.04 / 20.04, Mint 21.3, Oracle Linux 9 зі справжнім auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch із заглушкою auditctl (їхні дзеркала були недоступні з пісочниці) | успішно (13 дистрибутивів) |
+| Встановлення auditd самим скриптом через пакетний менеджер | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | успішно |
+| Стенд Server 2008 R2: Sysmon 10.42 з конфігом схеми 4.22 | VM, PowerShell 2.0 | працює, події пишуться; стабільний після перезавантаження (`-CollectOnly`: збоїв немає) |
+| Одна команда на справжніх машинах: звіт до/після, повторний запуск без змін | Windows 10 Pro 22H2 (ru-RU), Ubuntu 26.04 | успішно |
+| sshd `LogLevel VERBOSE`: з `Include` і без, з блоком `Match`; `sshd -t` проходить; повторний запуск нічого не змінює | Ubuntu 24.04, Oracle Linux 9 | успішно |
 | Завантаження згенерованих правил auditd у справжнє ядро | privileged-контейнер | прийнято 57/57 правил |
-| Встановлення sysmonforlinux з packages.microsoft.com | Ubuntu 22.04 | встановлюється (1.5.3) |
-| `tests/linux-bundle.sh`: `install.sh build` → встановлення з комплекту на чистий контейнер **без мережі** → повторний запуск без змін → змінений комплект відхилено | Ubuntu 22.04 (із Sysmon), Ubuntu 24.04 | успішно |
+| `tests/linux-bundle.sh`: `install.sh build` → встановлення з комплекту на чистий контейнер **без мережі** → повторний запуск без змін → змінений комплект відхилено | Ubuntu 22.04, Ubuntu 24.04, Oracle Linux 9 (rpm) | успішно |
 | `install.sh --fetch` завантажує основний скрипт з GitHub | Ubuntu 24.04 | успішно |
 | Sysmon 10.42 і 10.2 у `vendor/`: Authenticode (Microsoft, дійсний на момент мітки часу), FileVersion, закріплений хеш | osslsigncode + юніт-тест | успішно |
 
 **Ще не перевірено (потрібен реальний стенд):**
 - увесь Windows-код, що звертається до ОС: wevtutil, auditpol, встановлення Sysmon, реєстр, DISM;
 - `New-SecLoggingGpo.ps1` на справжньому AD/SYSVOL;
-- робота на Server 2008/R2, зокрема Sysmon 10.42/10.2 там (див. стендову перевірку вище);
 - `Install-SecLogging.ps1` на справжній Windows (юніт-тестами покрито лише його допоміжні функції);
-- `linux/install.sh build` на сімействі RHEL (дзеркала пакетів були недоступні з пісочниці);
-- Sysmon for Linux на хості з systemd (у контейнері sysmon приймає будь-який конфіг без перевірки).
+- Alpine (дзеркала недоступні з пісочниці) і встановлення пакетів на SUSE, Arch, Amazon Linux, CentOS 7;
+- `install.sh build` на CentOS 7 (`repotrack`);
 
 Рекомендований порядок:
 
@@ -359,5 +450,6 @@ done
 ```bash
 pwsh -NoProfile -File tests/windows-unit.ps1
 ./tests/linux-docker.sh          # IMAGES="ubuntu:24.04 debian:12" щоб вибрати образи
-./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 WITH_SYSMON=1
+./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 або IMAGE=oraclelinux:9
+# за проксі лише з HTTPS: CA_FILE=/path/ca.crt PROXY=$HTTPS_PROXY ./tests/linux-docker.sh
 ```

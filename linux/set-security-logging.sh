@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # set-security-logging.sh - визначає хост, перевіряє та вмикає журналювання безпеки Linux:
 #   auditd (+ правила), постійне зберігання і розмір journald, наявність/ротація auth-логу,
-#   за бажанням Sysmon for Linux, збір журналів агентом Wazuh.
+#   LogLevel VERBOSE для sshd (відбиток ключа при вході), перевірка синхронізації часу,
+#   збір журналів агентом Wazuh. Лише штатні засоби Linux, без сторонніх агентів.
 #
 # Порядок: визначення -> поточний стан -> застосувати лише відсутнє -> перевірка -> звіт.
 # Значення лише підвищуються: більші ліміти, вже налаштовані на хості, залишаються.
@@ -9,46 +10,47 @@
 # Використання: sudo ./set-security-logging.sh [параметри]
 #   --check                 лише перевірка, нічого не змінює
 #   --profile P             auto|workstation|server (за замовчуванням auto)
-#   --with-sysmon           встановити/налаштувати Sysmon for Linux (packages.microsoft.com)
-#   --sysmon-package-dir D  офлайн Sysmon: тека з .deb/.rpm + SHA256SUMS
 #   --configure-wazuh       додати відсутні <localfile> в ossec.conf агента Wazuh
 #   --immutable             заблокувати правила аудиту (-e 2) до перезавантаження
 #   --report FILE           шлях до JSON-звіту (типово /var/log/seclogging/report-<час>.json)
 #   --quiet                 виводити лише підсумок
+#   --snapshot FILE         записати знімок поточного стану у FILE і вийти (нічого не змінює)
+#   --compare BEFORE AFTER  показати, що змінилося між двома знімками (було -> стало)
+#   --compare-out FILE      зберегти результат --compare у FILE
 #   -h|--help
 
 set -u
 umask 027
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.3.0"
 CHECK=0
 PROFILE="auto"
-WITH_SYSMON=0
-SYSMON_PKG_DIR=""
 CONFIGURE_WAZUH=0
 IMMUTABLE=0
 REPORT=""
 QUIET=0
+SNAPSHOT=""
+CMP_BEFORE=""; CMP_AFTER=""; CMP_OUT=""
 
 RULES_FILE="/etc/audit/rules.d/50-seclogging.rules"
 JOURNALD_DROPIN="/etc/systemd/journald.conf.d/50-seclogging.conf"
-STATE_DIR="/var/lib/seclogging"
-SYSMON_CFG="/etc/seclogging/sysmon-linux.xml"
 MARK_BEGIN="<!-- SecLogging BEGIN (managed by set-security-logging.sh) -->"
 MARK_END="<!-- SecLogging END -->"
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --check) CHECK=1 ;;
         --profile) PROFILE="${2:-}"; shift ;;
-        --with-sysmon) WITH_SYSMON=1 ;;
-        --sysmon-package-dir) SYSMON_PKG_DIR="${2:-}"; WITH_SYSMON=1; shift ;;
+        --with-sysmon|--sysmon-package-dir) echo "Sysmon for Linux більше не підтримується: достатньо auditd і journald" >&2; exit 64 ;;
         --configure-wazuh) CONFIGURE_WAZUH=1 ;;
         --immutable) IMMUTABLE=1 ;;
         --report) REPORT="${2:-}"; shift ;;
         --quiet) QUIET=1 ;;
+        --snapshot) SNAPSHOT="${2:-}"; shift ;;
+        --compare) CMP_BEFORE="${2:-}"; CMP_AFTER="${3:-}"; shift 2 ;;
+        --compare-out) CMP_OUT="${2:-}"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Невідомий параметр: $1" >&2; usage; exit 64 ;;
     esac
@@ -87,6 +89,15 @@ result() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# ver_ge A B: A >= B (числові частини через крапку; без sort -V - його немає в busybox)
+ver_ge() {
+    awk -v a="$1" -v b="$2" 'BEGIN{na=split(a,x,/[^0-9]+/); nb=split(b,y,/[^0-9]+/); n=(na>nb?na:nb)
+        for(i=1;i<=n;i++){ if((x[i]+0)>(y[i]+0)) exit 0; if((x[i]+0)<(y[i]+0)) exit 1 } exit 0}'
+}
+
+# імʼя хоста: утиліти hostname немає в мінімальних образах (Fedora, Amazon Linux, openSUSE, Arch)
+host_name() { cat /proc/sys/kernel/hostname 2>/dev/null || uname -n; }
+
 # рядок розміру (100M, 1G, 512K, байти) -> МБ
 to_mb() {
     local v="${1:-}" n u
@@ -104,20 +115,36 @@ backup_once() { [ -f "$1" ] && [ ! -f "$1.seclogging.bak" ] && cp -p "$1" "$1.se
 # ------------------------------------------------------------------ визначення хоста
 
 OS_ID=""; OS_LIKE=""; OS_VER=""; OS_NAME=""; FAMILY="unknown"; PKG=""
-HAS_SYSTEMD=0; IN_CONTAINER=0; ROLE=""; ARCH=$(uname -m); KERNEL=$(uname -r)
+HAS_SYSTEMD=0; HAS_OPENRC=0; IN_CONTAINER=0; ROLE=""; ARCH=$(uname -m); KERNEL=$(uname -r)
 
 detect_host() {
     if [ -r /etc/os-release ]; then
         # shellcheck disable=SC1091
         . /etc/os-release
         OS_ID="${ID:-}"; OS_LIKE="${ID_LIKE:-}"; OS_VER="${VERSION_ID:-}"; OS_NAME="${PRETTY_NAME:-$OS_ID}"
+    elif [ -r /etc/redhat-release ]; then
+        OS_ID="rhel"; OS_NAME=$(head -1 /etc/redhat-release); OS_VER=$(grep -oE '[0-9]+(\.[0-9]+)?' /etc/redhat-release | head -1)
     fi
+    # 1) за os-release (ID, потім ID_LIKE - так покриваються похідні: Mint, Astra, Rocky, Oracle, Amazon, ...)
     case " $OS_ID $OS_LIKE " in
+        *" altlinux "*) FAMILY="alt"; PKG="apt" ;;                     # ALT: apt-rpm
         *" debian "*|*" ubuntu "*) FAMILY="deb"; PKG="apt" ;;
-        *" rhel "*|*" fedora "*|*" centos "*) FAMILY="rpm"; if have dnf; then PKG="dnf"; else PKG="yum"; fi ;;
+        *" rhel "*|*" fedora "*|*" centos "*|*" amzn "*) FAMILY="rpm" ;;
         *" suse "*|*" sles "*|*" opensuse "*) FAMILY="suse"; PKG="zypper" ;;
+        *" arch "*|*" archlinux "*) FAMILY="arch"; PKG="pacman" ;;
+        *" alpine "*) FAMILY="alpine"; PKG="apk" ;;
     esac
+    # 2) невідомий дистрибутив: за наявним пакетним менеджером
+    if [ "$FAMILY" = "unknown" ]; then
+        if have apt-get && have dpkg; then FAMILY="deb"; PKG="apt"
+        elif have dnf || have yum; then FAMILY="rpm"
+        elif have zypper; then FAMILY="suse"; PKG="zypper"
+        elif have pacman; then FAMILY="arch"; PKG="pacman"
+        elif have apk; then FAMILY="alpine"; PKG="apk"; fi
+    fi
+    if [ "$FAMILY" = "rpm" ]; then if have dnf; then PKG="dnf"; else PKG="yum"; fi; fi
     [ -d /run/systemd/system ] && HAS_SYSTEMD=1
+    [ "$HAS_SYSTEMD" -eq 0 ] && have rc-service && HAS_OPENRC=1
     if have systemd-detect-virt && systemd-detect-virt -cq 2>/dev/null; then IN_CONTAINER=1
     elif [ -f /.dockerenv ] || [ -f /run/.containerenv ] || grep -qaE '(docker|lxc|kubepods|containerd)' /proc/1/cgroup 2>/dev/null; then IN_CONTAINER=1; fi
 
@@ -128,6 +155,8 @@ detect_host() {
         ROLE="$PROFILE"
     fi
 }
+
+init_name() { if [ "$HAS_SYSTEMD" -eq 1 ]; then echo systemd; elif [ "$HAS_OPENRC" -eq 1 ]; then echo openrc; else echo sysv; fi; }
 
 # Значення профілю (МБ / кількість)
 set_profile() {
@@ -155,21 +184,58 @@ pkg_install() {
         dnf) dnf install -y -q "$@" >/tmp/seclogging-pkg.log 2>&1 ;;
         yum) yum install -y -q "$@" >/tmp/seclogging-pkg.log 2>&1 ;;
         zypper) zypper --non-interactive install "$@" >/tmp/seclogging-pkg.log 2>&1 ;;
-        *) return 1 ;;
+        pacman) pacman -S --noconfirm --needed "$@" >/tmp/seclogging-pkg.log 2>&1 ;;
+        apk) apk add --no-progress "$@" >/tmp/seclogging-pkg.log 2>&1 ;;
+        *) echo "невідомий пакетний менеджер" >/tmp/seclogging-pkg.log; return 1 ;;
     esac
 }
+
+# Підказка до помилки встановлення: репозиторії дистрибутивів, що вийшли з підтримки
+pkg_hint() {
+    case "$OS_ID:${OS_VER%%.*}" in
+        centos:7|centos:8) echo " - репозиторії CentOS ${OS_VER%%.*} перенесено на vault.centos.org (виправте /etc/yum.repos.d або використайте офлайн-комплект install.sh)" ;;
+        *) grep -qiE 'Could not resolve|Failed to (download|fetch)|Cannot find a valid baseurl|Temporary failure' /tmp/seclogging-pkg.log 2>/dev/null \
+               && echo " - немає доступу до репозиторіїв (без інтернету використайте офлайн-комплект install.sh)" ;;
+    esac
+}
+
+# назва пакета auditd у сімействі
+audit_pkg_name() { case "$FAMILY" in deb) echo auditd ;; *) echo audit ;; esac; }
 
 svc_restart() {
     # RHEL відмовляє в "systemctl restart auditd"; обгортка service працює всюди.
     local s="$1"
+    if [ "$HAS_OPENRC" -eq 1 ]; then rc-service "$s" restart >/dev/null 2>&1; return $?; fi
     if have service; then service "$s" restart >/dev/null 2>&1 && return 0; fi
     if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl restart "$s" >/dev/null 2>&1 && return 0; fi
     [ -x "/etc/init.d/$s" ] && "/etc/init.d/$s" restart >/dev/null 2>&1
 }
 
+svc_reload_or_restart() {
+    local s="$1"
+    if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl reload-or-restart "$s" >/dev/null 2>&1; return $?; fi
+    svc_restart "$s"
+}
+
+svc_start() {
+    local s="$1"
+    if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl start "$s" >/dev/null 2>&1; return $?; fi
+    if [ "$HAS_OPENRC" -eq 1 ]; then rc-service "$s" start >/dev/null 2>&1; return $?; fi
+    svc_restart "$s"
+}
+
+svc_enable() {
+    local s="$1"
+    if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl enable "$s" >/dev/null 2>&1
+    elif [ "$HAS_OPENRC" -eq 1 ]; then rc-update add "$s" default >/dev/null 2>&1
+    elif have chkconfig; then chkconfig "$s" on >/dev/null 2>&1
+    elif have update-rc.d; then update-rc.d "$s" enable >/dev/null 2>&1; fi
+}
+
 svc_active() {
     local s="$1"
     if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl is-active --quiet "$s"; return $?; fi
+    if [ "$HAS_OPENRC" -eq 1 ]; then rc-service "$s" status >/dev/null 2>&1; return $?; fi
     have service && service "$s" status >/dev/null 2>&1
 }
 
@@ -310,16 +376,19 @@ audit_version_ge() {
     # auditctl -v на старих версіях потребує CAP_AUDIT_CONTROL: беремо версію пакета
     local cur; cur=$( { auditctl -v 2>/dev/null; dpkg-query -W -f='${Version}\n' auditd 2>/dev/null; rpm -q --qf '%{VERSION}\n' audit 2>/dev/null; } \
         | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
-    [ -n "$cur" ] && [ "$(printf '%s\n%s\n' "$1" "$cur" | sort -V | head -1)" = "$1" ]
+    [ -n "$cur" ] && ver_ge "$cur" "$1"
 }
+
+# Наші правила завантажені в ядро? auditctl -l друкує ключ як "-k identity" для -w і "-F key=identity" для -a
+rules_active() { auditctl -l 2>/dev/null | grep -qE '(-k |key=)identity( |$)'; }
 
 do_auditd() {
     if ! have auditctl; then
         if [ "$CHECK" -eq 1 ]; then result auditd package WouldChange "встановити auditd"; return
         fi
-        local pkgname="audit"; [ "$FAMILY" = "deb" ] && pkgname="auditd"
-        if pkg_install "$pkgname"; then result auditd package Changed "встановлено $pkgname"
-        else result auditd package Error "не вдалося встановити $pkgname (див. /tmp/seclogging-pkg.log)"; return; fi
+        local pkgname; pkgname=$(audit_pkg_name)
+        if pkg_install "$pkgname" && have auditctl; then result auditd package Changed "встановлено $pkgname"
+        else result auditd package Error "не вдалося встановити $pkgname через ${PKG:-?} (див. /tmp/seclogging-pkg.log)$(pkg_hint)"; return; fi
     else
         result auditd package OK "$(auditctl -v 2>/dev/null | head -1 || true)"
     fi
@@ -391,22 +460,22 @@ do_auditd() {
         if svc_active auditd; then result auditd service OK "працює, enabled=$enabled"; else result auditd service WouldChange "запустити auditd"; fi
         return
     fi
-    if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl enable auditd >/dev/null 2>&1; fi
+    svc_enable auditd
     if ! svc_active auditd; then
-        if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl start auditd >/dev/null 2>&1; else svc_restart auditd; fi
+        svc_start auditd
         AUDITD_RESTART=0
     elif [ "${AUDITD_RESTART:-0}" -eq 1 ]; then
         svc_restart auditd || result auditd service Error "перезапуск не вдався"
     fi
     if svc_active auditd; then result auditd service OK "працює"; else result auditd service Error "auditd не працює"; fi
 
-    if [ "${RULES_CHANGED:-0}" -eq 1 ] || ! auditctl -l 2>/dev/null | grep -q 'key=identity'; then
+    if [ "${RULES_CHANGED:-0}" -eq 1 ] || ! rules_active; then
         if [ "$enabled" = "2" ]; then
             result auditd "завантаження правил" Warning "правила аудиту незмінні (-e 2): нові правила діятимуть після перезавантаження"
         else
             local out
-            if have augenrules; then out=$(augenrules --load 2>&1); else out=$(auditctl -R /etc/audit/audit.rules 2>&1); fi
-            if auditctl -l 2>/dev/null | grep -q 'key=identity'; then
+            if have augenrules; then out=$(augenrules --load 2>&1); else out=$(auditctl -R "$RULES_FILE" 2>&1); fi
+            if rules_active; then
                 result auditd "завантаження правил" Changed "завантажено, активних правил: $(auditctl -l 2>/dev/null | grep -c .)"
             else
                 result auditd "завантаження правил" Error "правила не активні: $(printf '%s' "$out" | tail -3)"
@@ -437,7 +506,7 @@ do_journald() {
     if [ "$storage" = "persistent" ] || { [ "${storage:-auto}" = "auto" ] && [ -d /var/log/journal ]; }; then persistent=1; fi
     [ "$persistent" -eq 0 ] && changes+="Storage=${storage:-auto}(volatile)->persistent "
     [ "$max_mb" -lt "$JOURNAL_MAX_MB" ] && changes+="SystemMaxUse=${max:-default}->${JOURNAL_MAX_MB}M "
-    if [ -z "$changes" ]; then result journald journald.conf OK "Storage=${storage:-auto} persistent, SystemMaxUse=${max}"; return; fi
+    if [ -z "$changes" ]; then result journald journald.conf OK "Storage=${storage:-auto}$([ "${storage:-auto}" = persistent ] || echo " (є /var/log/journal - на диску)"), SystemMaxUse=${max}"; return; fi
     if [ "$CHECK" -eq 1 ]; then result journald journald.conf WouldChange "$changes"; return; fi
     local want=$JOURNAL_MAX_MB; [ "$max_mb" -gt "$want" ] && want=$max_mb
     mkdir -p "$(dirname "$JOURNALD_DROPIN")" /var/log/journal
@@ -453,7 +522,10 @@ do_journald() {
 
 AUTH_LOG=""
 do_authlog() {
-    if [ "$FAMILY" = "deb" ]; then AUTH_LOG=/var/log/auth.log; else AUTH_LOG=/var/log/secure; fi
+    # де syslog пише автентифікацію: спершу фактичний файл, інакше типовий для сімейства
+    if [ -f /var/log/auth.log ]; then AUTH_LOG=/var/log/auth.log
+    elif [ -f /var/log/secure ]; then AUTH_LOG=/var/log/secure
+    else case "$FAMILY" in deb) AUTH_LOG=/var/log/auth.log ;; suse|arch|alpine) AUTH_LOG=/var/log/messages ;; *) AUTH_LOG=/var/log/secure ;; esac; fi
     if have rsyslogd || have syslog-ng; then
         if [ -f "$AUTH_LOG" ]; then result authlog "$AUTH_LOG" OK "присутній"
         else result authlog "$AUTH_LOG" Warning "syslog-демон встановлено, але $AUTH_LOG відсутній (служба зупинена?)"; fi
@@ -475,130 +547,90 @@ do_authlog() {
     else result authlog logrotate Warning "$f: зберігається лише ~${days} дн. (rotate ${rot:-?} ${period:-?}), потрібно >= 7"; fi
 }
 
-# ------------------------------------------------------------------ Sysmon for Linux
+# ------------------------------------------------------------------ sshd: LogLevel VERBOSE
 
-SYSMON_CONFIG_XML='<Sysmon schemaversion="4.70">
-  <!-- Керується set-security-logging.sh. Події йдуть у syslog (Linux-Sysmon/Operational). -->
-  <EventFiltering>
-    <!-- 1: створення процесів (усі) -->
-    <RuleGroup name="" groupRelation="or">
-      <ProcessCreate onmatch="exclude"/>
-    </RuleGroup>
-    <!-- 3: мережеві зʼєднання, без loopback -->
-    <RuleGroup name="" groupRelation="or">
-      <NetworkConnect onmatch="exclude">
-        <DestinationIp condition="is">127.0.0.1</DestinationIp>
-        <DestinationIp condition="is">::1</DestinationIp>
-      </NetworkConnect>
-    </RuleGroup>
-    <!-- 5: завершення процесів - вимкнено -->
-    <RuleGroup name="" groupRelation="or">
-      <ProcessTerminate onmatch="include"/>
-    </RuleGroup>
-    <!-- 9: пряме читання диска -->
-    <RuleGroup name="" groupRelation="or">
-      <RawAccessRead onmatch="exclude"/>
-    </RuleGroup>
-    <!-- 11: створення файлів у місцях закріплення / чутливих місцях -->
-    <RuleGroup name="" groupRelation="or">
-      <FileCreate onmatch="include">
-        <TargetFilename condition="begin with">/etc/cron</TargetFilename>
-        <TargetFilename condition="begin with">/var/spool/cron</TargetFilename>
-        <TargetFilename condition="begin with">/etc/systemd/system</TargetFilename>
-        <TargetFilename condition="begin with">/etc/sudoers</TargetFilename>
-        <TargetFilename condition="begin with">/etc/ld.so</TargetFilename>
-        <TargetFilename condition="begin with">/etc/profile.d</TargetFilename>
-        <TargetFilename condition="end with">/.ssh/authorized_keys</TargetFilename>
-        <TargetFilename condition="end with">.bashrc</TargetFilename>
-        <TargetFilename condition="begin with">/dev/shm</TargetFilename>
-      </FileCreate>
-    </RuleGroup>
-    <!-- 23: видалення файлів - вимкнено -->
-    <RuleGroup name="" groupRelation="or">
-      <FileDelete onmatch="include"/>
-    </RuleGroup>
-  </EventFiltering>
-</Sysmon>'
+SSHD_DROPIN="/etc/ssh/sshd_config.d/01-seclogging.conf"
 
-kernel_ge() { # kernel_ge 4.15
-    local want="$1" cur; cur=$(printf '%s' "$KERNEL" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
-    [ "$(printf '%s\n%s\n' "$want" "$cur" | sort -V | head -1)" = "$want" ]
+# LogLevel із файлів конфігу без sshd -T: перше значення до першого Match (drop-in-и - якщо Include на початку)
+sshd_loglevel_static() {
+    local files=() f
+    if grep -qiE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config 2>/dev/null; then
+        for f in /etc/ssh/sshd_config.d/*.conf; do [ -f "$f" ] && files+=("$f"); done
+    fi
+    files+=(/etc/ssh/sshd_config)
+    awk 'tolower($1)=="match"{exit} tolower($1)=="loglevel"{print toupper($2); found=1; exit} END{if(!found) print "INFO"}' "${files[@]}" 2>/dev/null
 }
 
-sysmon_repo_url() {
-    local major="${OS_VER%%.*}"
-    case "$OS_ID" in
-        ubuntu) echo "https://packages.microsoft.com/config/ubuntu/$OS_VER/packages-microsoft-prod.deb" ;;
-        debian) echo "https://packages.microsoft.com/config/debian/$major/packages-microsoft-prod.deb" ;;
-        rhel|rocky|almalinux|centos|ol) echo "https://packages.microsoft.com/config/rhel/$major/packages-microsoft-prod.rpm" ;;
-        fedora) echo "https://packages.microsoft.com/config/fedora/$major/packages-microsoft-prod.rpm" ;;
-        sles|opensuse-leap) echo "https://packages.microsoft.com/config/sles/$major/packages-microsoft-prod.rpm" ;;
-        *) echo "" ;;
+# фактичний LogLevel sshd, у верхньому регістрі: sshd -T, а якщо він не працює - з файлів конфігу
+sshd_loglevel() {
+    local v; v=$(sshd -T 2>/dev/null | awk 'tolower($1)=="loglevel"{print toupper($2); exit}')
+    [ -n "$v" ] && { echo "$v"; return; }
+    sshd_loglevel_static
+}
+
+do_ssh() {
+    # VERBOSE: у журнал автентифікації потрапляє відбиток ключа, яким виконано вхід (видно, чий це ключ)
+    if [ ! -f /etc/ssh/sshd_config ] || ! have sshd; then result ssh sshd Skipped "OpenSSH-сервер не встановлено"; return; fi
+    local cur; cur=$(sshd_loglevel)
+    # sshd -T потребує ключів хоста і /run/sshd; коли служба не запущена, їх може не бути
+    if [ "$CHECK" -eq 0 ] && ! sshd -T >/dev/null 2>&1; then
+        [ -d /run/sshd ] || { mkdir /run/sshd && chmod 0755 /run/sshd; } 2>/dev/null
+        have ssh-keygen && ssh-keygen -A >/dev/null 2>&1
+        cur=$(sshd_loglevel)
+    fi
+    case "$cur" in
+        VERBOSE|DEBUG*) result ssh LogLevel OK "$cur"; return ;;
+        '') result ssh LogLevel Warning "не вдалося прочитати конфіг (sshd -T)"; return ;;
     esac
+    if [ "$CHECK" -eq 1 ]; then result ssh LogLevel WouldChange "$cur -> VERBOSE"; return; fi
+    local how
+    # sshd бере ПЕРШЕ знайдене значення: drop-in з "01-" діє, лише якщо Include стоїть на початку sshd_config
+    if [ -d /etc/ssh/sshd_config.d ] && grep -qiE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config; then
+        printf '# Керується set-security-logging.sh: відбиток ключа при вході в журналі автентифікації\nLogLevel VERBOSE\n' > "$SSHD_DROPIN"
+        how="$SSHD_DROPIN"
+    fi
+    if [ "$(sshd_loglevel)" != "VERBOSE" ]; then
+        # немає Include (або його перекрито): рядок на початок sshd_config, до будь-яких Match
+        rm -f "$SSHD_DROPIN"
+        backup_once /etc/ssh/sshd_config
+        sed -i -E 's/^([[:space:]]*LogLevel[[:space:]].*)$/# \1  # замінено set-security-logging.sh/I' /etc/ssh/sshd_config
+        sed -i '1i LogLevel VERBOSE' /etc/ssh/sshd_config
+        how="/etc/ssh/sshd_config"
+    fi
+    if ! sshd -t 2>/dev/null; then
+        # конфіг зламано - повертаємо як було, sshd не перезапускаємо
+        rm -f "$SSHD_DROPIN"; [ -f /etc/ssh/sshd_config.seclogging.bak ] && cp -p /etc/ssh/sshd_config.seclogging.bak /etc/ssh/sshd_config
+        result ssh LogLevel Error "sshd -t відхилив конфіг, зміни скасовано"; return
+    fi
+    local s
+    if [ "$IN_CONTAINER" -eq 0 ]; then for s in ssh sshd; do svc_active "$s" && svc_reload_or_restart "$s" && break; done; fi
+    if [ "$(sshd_loglevel)" = "VERBOSE" ]; then result ssh LogLevel Changed "$cur -> VERBOSE ($how)"
+    else result ssh LogLevel Error "LogLevel лишився $(sshd_loglevel)"; fi
 }
 
-install_sysmon_pkg() {
-    if [ -n "$SYSMON_PKG_DIR" ]; then
-        # офлайн: спершу перевіряємо SHA256SUMS
-        [ -f "$SYSMON_PKG_DIR/SHA256SUMS" ] || { echo "SHA256SUMS відсутній у $SYSMON_PKG_DIR"; return 1; }
-        (cd "$SYSMON_PKG_DIR" && sha256sum -c --quiet SHA256SUMS) || { echo "перевірка SHA256SUMS не пройдена"; return 1; }
-        case "$FAMILY" in
-            deb) DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$SYSMON_PKG_DIR"/*.deb ;;
-            rpm) $PKG install -y -q "$SYSMON_PKG_DIR"/*.rpm ;;
-            suse) zypper --non-interactive install "$SYSMON_PKG_DIR"/*.rpm ;;
-            *) return 1 ;;
-        esac
-        return $?
+# ------------------------------------------------------------------ синхронізація часу
+
+# стан синхронізації: yes / no / unknown
+time_synced() {
+    local v
+    if have timedatectl; then
+        v=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+        [ -z "$v" ] && v=$(timedatectl status 2>/dev/null | awk -F: 'tolower($1) ~ /synchronized/ {gsub(/ /,"",$2); print $2; exit}')
+        case "$v" in yes) echo yes; return ;; no) echo no; return ;; esac
     fi
-    # online: репозиторій Microsoft (початкове завантаження по HTTPS, далі репозиторій з перевіркою GPG)
-    local url tmp; url=$(sysmon_repo_url)
-    [ -n "$url" ] || { echo "немає репозиторію packages.microsoft.com для $OS_ID $OS_VER"; return 1; }
-    tmp=$(mktemp -d)
-    have curl || have wget || pkg_install curl ca-certificates
-    if have curl; then curl -fsSL -o "$tmp/pkg" "$url"; else wget -q -O "$tmp/pkg" "$url"; fi || { echo "завантаження не вдалося: $url"; rm -rf "$tmp"; return 1; }
-    case "$FAMILY" in
-        deb) mv "$tmp/pkg" "$tmp/pkg.deb"; dpkg -i "$tmp/pkg.deb" && apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q sysmonforlinux ;;
-        rpm) mv "$tmp/pkg" "$tmp/pkg.rpm"; rpm -Uvh --replacepkgs "$tmp/pkg.rpm" && $PKG install -y -q sysmonforlinux ;;
-        suse) mv "$tmp/pkg" "$tmp/pkg.rpm"; rpm -Uvh --replacepkgs "$tmp/pkg.rpm" && zypper --non-interactive install sysmonforlinux ;;
+    if have chronyc; then chronyc -n tracking 2>/dev/null | grep -qiE '^Leap status *: *Normal' && { echo yes; return; }; echo no; return; fi
+    if have ntpstat; then ntpstat >/dev/null 2>&1 && echo yes || echo no; return; fi
+    echo unknown
+}
+
+do_time() {
+    # лише перевірка: розбіжний час ламає зіставлення подій між машинами
+    if [ "$IN_CONTAINER" -eq 1 ]; then result time sync Skipped "контейнер: час належить хосту"; return; fi
+    case "$(time_synced)" in
+        yes) result time sync OK "час синхронізовано" ;;
+        no) result time sync Warning "час не синхронізовано (NTP): події на різних машинах важко зіставити - увімкніть timedatectl set-ntp true / chronyd" ;;
+        *) result time sync Warning "не вдалося визначити стан синхронізації часу (немає timedatectl/chronyc/ntpstat)" ;;
     esac
-    local rc=$?; rm -rf "$tmp"; return $rc
-}
-
-do_sysmon() {
-    if [ "$WITH_SYSMON" -eq 0 ]; then
-        if have sysmon; then result sysmon sysmon OK "встановлено (без --with-sysmon не керується)"
-        else result sysmon sysmon Skipped "не запитано (--with-sysmon)"; fi
-        return
-    fi
-    if [ "$IN_CONTAINER" -eq 1 ]; then result sysmon sysmon Skipped "контейнер: eBPF-сенсор належить хосту"; return; fi
-    if ! kernel_ge 4.15; then result sysmon sysmon Warning "ядро $KERNEL < 4.15: Sysmon for Linux (eBPF) не підтримується"; return; fi
-
-    local cfg_hash applied=""
-    cfg_hash=$(printf '%s\n' "$SYSMON_CONFIG_XML" | sha256sum | awk '{print $1}')
-    [ -f "$STATE_DIR/sysmon-config.sha256" ] && applied=$(cat "$STATE_DIR/sysmon-config.sha256")
-
-    if ! have sysmon; then
-        if [ "$CHECK" -eq 1 ]; then result sysmon sysmon WouldChange "встановити sysmonforlinux + конфіг"; return; fi
-        local out; out=$(install_sysmon_pkg 2>&1)
-        if ! have sysmon; then result sysmon package Error "встановлення не вдалося: $(printf '%s' "$out" | tail -3)"; return; fi
-        result sysmon package Changed "sysmonforlinux встановлено"
-    else
-        result sysmon package OK "$(dpkg-query -W -f='${Version}' sysmonforlinux 2>/dev/null || rpm -q sysmonforlinux 2>/dev/null)"
-    fi
-
-    local running=0; svc_active sysmon && running=1
-    if [ "$running" -eq 1 ] && [ "$applied" = "$cfg_hash" ]; then result sysmon config OK "$cfg_hash"; return; fi
-    if [ "$CHECK" -eq 1 ]; then result sysmon config WouldChange "застосувати $cfg_hash"; return; fi
-    mkdir -p "$(dirname "$SYSMON_CFG")" "$STATE_DIR"
-    printf '%s\n' "$SYSMON_CONFIG_XML" > "$SYSMON_CFG"
-    local out
-    if [ "$running" -eq 1 ]; then out=$(sysmon -c "$SYSMON_CFG" 2>&1); else out=$(sysmon -accepteula -i "$SYSMON_CFG" 2>&1); fi
-    if svc_active sysmon; then
-        echo "$cfg_hash" > "$STATE_DIR/sysmon-config.sha256"
-        result sysmon config Changed "застосовано $cfg_hash, служба працює"
-    else
-        result sysmon config Error "sysmon не працює: $(printf '%s' "$out" | tail -3)"
-    fi
 }
 
 # ------------------------------------------------------------------ Wazuh
@@ -607,14 +639,11 @@ do_wazuh() {
     local conf=/var/ossec/etc/ossec.conf shared=/var/ossec/etc/shared/agent.conf
     if [ ! -f "$conf" ]; then result wazuh agent Warning "Агент Wazuh не встановлено - журнали залишаються лише локально"; return; fi
     local ver=""; [ -x /var/ossec/bin/wazuh-control ] && ver=$(/var/ossec/bin/wazuh-control info -v 2>/dev/null)
-    if svc_active wazuh-agent; then result wazuh agent OK "працює ${ver}"; else result wazuh agent Warning "встановлено ${ver}, але не працює"; fi
+    if svc_active wazuh-agent; then result wazuh agent OK "працює${ver:+ $ver}"; else result wazuh agent Warning "встановлено${ver:+ $ver}, але не працює"; fi
 
     # потрібні: "формат|розташування"
     local wanted=("audit|/var/log/audit/audit.log")
     if [ -n "$AUTH_LOG" ]; then wanted+=("syslog|$AUTH_LOG"); else wanted+=("journald|journald"); fi
-    if [ "$WITH_SYSMON" -eq 1 ] && [ -n "$AUTH_LOG" ]; then
-        if [ "$FAMILY" = "deb" ]; then wanted+=("syslog|/var/log/syslog"); else wanted+=("syslog|/var/log/messages"); fi
-    fi
     local present missing=() w loc
     present=$(cat "$conf" "$shared" 2>/dev/null | grep -oE '<location>[^<]+</location>' | sed -E 's|</?location>||g')
     for w in "${wanted[@]}"; do
@@ -637,7 +666,7 @@ do_wazuh() {
     {
         echo "$MARK_BEGIN"
         echo "<ossec_config>"
-        printf '%s\n' "${old[@]}" "${missing[@]}" | awk 'NF && !seen[$0]++' | while IFS='|' read -r fmt loc; do
+        printf '%s\n' ${old[@]+"${old[@]}"} "${missing[@]}" | awk 'NF && !seen[$0]++' | while IFS='|' read -r fmt loc; do
             printf '  <localfile>\n    <log_format>%s</log_format>\n    <location>%s</location>\n  </localfile>\n' "$fmt" "$loc"
         done
         echo "</ossec_config>"
@@ -648,26 +677,106 @@ do_wazuh() {
     else result wazuh localfile Changed "додано $list; перезапустіть wazuh-agent вручну"; fi
 }
 
+# ------------------------------------------------------------------ знімки стану "до / після"
+
+# Рядки "Область<TAB>Елемент<TAB>Значення" - усе, що скрипт перевіряє або змінює
+state_snapshot() {
+    local k v f
+    if have auditctl; then
+        printf 'auditd\tпакет\t%s\n' "$( { dpkg-query -W -f='${Version}' auditd 2>/dev/null || rpm -q audit 2>/dev/null || auditctl -v 2>/dev/null; } | head -1)"
+        printf 'auditd\tслужба\t%s\n' "$(svc_active auditd && echo працює || echo 'не працює')"
+        v=$(auditctl -s 2>/dev/null | awk '/^enabled/{print $2}'); printf 'auditd\tаудит ядра (enabled)\t%s\n' "${v:-(невідомо)}"
+        printf 'auditd\tактивних правил\t%s\n' "$(auditctl -l 2>/dev/null | grep -c '^-')"
+    else
+        printf 'auditd\tпакет\tне встановлено\n'
+    fi
+    for k in max_log_file num_logs max_log_file_action log_format space_left_action; do
+        v=$(get_kv /etc/audit/auditd.conf "$k"); printf 'auditd.conf\t%s\t%s\n' "$k" "${v:-(не задано)}"
+    done
+    for f in /etc/audit/rules.d/*.rules; do
+        [ -f "$f" ] && printf 'auditd.rules\t%s\t%s\n' "$f" "$(sha256sum "$f" | cut -c1-16) ($(grep -cE '^-(w|a) ' "$f") правил)"
+    done
+    if [ "$HAS_SYSTEMD" -eq 1 ]; then
+        v=$(journald_value Storage); printf 'journald\tStorage\t%s\n' "${v:-auto (за замовчуванням)}"
+        v=$(journald_value SystemMaxUse); printf 'journald\tSystemMaxUse\t%s\n' "${v:-(за замовчуванням)}"
+        printf 'journald\t/var/log/journal\t%s\n' "$([ -d /var/log/journal ] && echo є || echo немає)"
+    fi
+    if have sshd && [ -f /etc/ssh/sshd_config ]; then v=$(sshd_loglevel); printf 'ssh\tLogLevel\t%s\n' "${v:-(невідомо)}"; fi
+    [ "$IN_CONTAINER" -eq 0 ] && printf 'time\tсинхронізація\t%s\n' "$(time_synced)"
+    printf 'syslog\tдемон\t%s\n' "$(if have rsyslogd; then echo rsyslog; elif have syslog-ng; then echo syslog-ng; else echo немає; fi)"
+    for f in /var/log/auth.log /var/log/secure /var/log/messages /var/log/syslog; do
+        [ -f "$f" ] && printf 'syslog\t%s\tє\n' "$f"
+    done
+    if [ -f /var/ossec/etc/ossec.conf ]; then
+        printf 'wazuh\tагент\t%s\n' "$(svc_active wazuh-agent && echo працює || echo 'не працює')"
+        cat /var/ossec/etc/ossec.conf /var/ossec/etc/shared/agent.conf 2>/dev/null | grep -oE '<location>[^<]+</location>' \
+            | sed -E 's|</?location>||g' | sort -u | while IFS= read -r v; do printf 'wazuh\t%s\tзбирається\n' "$v"; done
+    else
+        printf 'wazuh\tагент\tне встановлено\n'
+    fi
+}
+
+save_snapshot() {
+    local out="$1"
+    mkdir -p "$(dirname "$out")"
+    {
+        printf '# SecLogging знімок стану; %s; %s; %s; скрипт %s\n' "$(host_name)" "$OS_NAME" "$(date '+%Y-%m-%d %H:%M:%S')" "$SCRIPT_VERSION"
+        printf '# Область\tЕлемент\tЗначення\n'
+        state_snapshot | LC_ALL=C sort
+    } > "$out"
+}
+
+# compare_snapshots BEFORE AFTER -> звіт "було -> стало"; повертає 0
+compare_snapshots() {
+    awk -F'\t' '
+        FNR==1 { hdr[++nf]=$0 }
+        /^#/ || NF<3 { next }
+        { k=$1 FS $2; v=$3; for(i=4;i<=NF;i++) v=v FS $i
+          if (NR==FNR) { b[k]=v } else { a[k]=v }; keys[k]=1 }
+        END {
+            n=0; for (k in keys) if (!(k in b) || !(k in a) || b[k]!=a[k]) ch[++n]=k
+            # сортування за ключем (область, елемент)
+            for (i=2;i<=n;i++){ t=ch[i]; j=i-1; while(j>0 && ch[j]>t){ch[j+1]=ch[j]; j--} ch[j+1]=t }
+            print "SecLogging: що змінилося"
+            print "До:    " hdr[1]; print "Після: " hdr[2]; print "Змін: " n
+            area=""
+            for (i=1;i<=n;i++) { split(ch[i], p, FS)
+                if (p[1]!=area) { area=p[1]; print ""; print "[" area "]" }
+                print "  " p[2]
+                print "      було:  " ((ch[i] in b) ? b[ch[i]] : "(не було)")
+                print "      стало: " ((ch[i] in a) ? a[ch[i]] : "(зникло)") }
+            if (!n) { print ""; print "Змін немає." }
+        }' "$1" "$2"
+}
+
 # ------------------------------------------------------------------ основна частина
 
 main() {
+    if [ -n "$CMP_BEFORE" ]; then
+        [ -f "$CMP_BEFORE" ] && [ -f "$CMP_AFTER" ] || { echo "Для --compare потрібні два наявні файли знімків" >&2; exit 64; }
+        if [ -n "$CMP_OUT" ]; then mkdir -p "$(dirname "$CMP_OUT")"; compare_snapshots "$CMP_BEFORE" "$CMP_AFTER" | tee "$CMP_OUT"
+        else compare_snapshots "$CMP_BEFORE" "$CMP_AFTER"; fi
+        exit 0
+    fi
     if [ "$(id -u)" -ne 0 ]; then echo "Запустіть від root (sudo)." >&2; exit 3; fi
+    if [ -n "$SNAPSHOT" ]; then detect_host; save_snapshot "$SNAPSHOT"; echo "Знімок стану: $SNAPSHOT"; exit 0; fi
     local started; started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     detect_host
     if [ "$QUIET" -eq 0 ]; then
         echo
         echo "set-security-logging $SCRIPT_VERSION  режим: $([ "$CHECK" -eq 1 ] && echo 'ЛИШЕ ПЕРЕВІРКА' || echo 'ЗАСТОСУВАННЯ')"
-        echo "$(hostname): $OS_NAME, сімейство=$FAMILY, роль=$ROLE, ядро=$KERNEL, $ARCH, systemd=$HAS_SYSTEMD, контейнер=$IN_CONTAINER"
+        echo "$(host_name): $OS_NAME, сімейство=$FAMILY, роль=$ROLE, ядро=$KERNEL, $ARCH, init=$(init_name), контейнер=$IN_CONTAINER"
         echo
     fi
-    result Host Роль OK "$ROLE (сімейство $FAMILY, пакетний менеджер ${PKG:-немає})"
-    [ "$FAMILY" = "unknown" ] && result Host Дистрибутив Warning "непідтримуваний дистрибутив '$OS_ID': встановлення пакетів пропускається"
+    result Host Роль OK "$ROLE (сімейство $FAMILY, пакетний менеджер ${PKG:-немає}, init $(init_name))"
+    [ "$FAMILY" = "unknown" ] && result Host Дистрибутив Warning "невідомий дистрибутив '${OS_ID:-?}' без відомого пакетного менеджера: відсутні пакети не встановлюються, решта налаштувань застосовується"
     set_profile
     AUDITD_RESTART=0; RULES_CHANGED=0
     do_auditd
     do_journald
     do_authlog
-    do_sysmon
+    do_ssh
+    do_time
     do_wazuh
 
     local finished; finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -678,7 +787,7 @@ main() {
         printf '{\n  "Tool": "set-security-logging", "Version": "%s", "Mode": "%s",\n' "$SCRIPT_VERSION" "$([ "$CHECK" -eq 1 ] && echo Check || echo Apply)"
         printf '  "Started": "%s", "Finished": "%s",\n' "$started" "$finished"
         printf '  "Host": {"Name": "%s", "OS": "%s", "Family": "%s", "Role": "%s", "Kernel": "%s", "Arch": "%s", "Container": %s},\n' \
-            "$(json_escape "$(hostname)")" "$(json_escape "$OS_NAME")" "$FAMILY" "$ROLE" "$KERNEL" "$ARCH" "$([ "$IN_CONTAINER" -eq 1 ] && echo true || echo false)"
+            "$(json_escape "$(host_name)")" "$(json_escape "$OS_NAME")" "$FAMILY" "$ROLE" "$KERNEL" "$ARCH" "$([ "$IN_CONTAINER" -eq 1 ] && echo true || echo false)"
         printf '  "Summary": {"OK": %d, "Changed": %d, "WouldChange": %d, "Warning": %d, "Error": %d, "Skipped": %d},\n' "$N_OK" "$N_CHANGED" "$N_WOULD" "$N_WARN" "$N_ERR" "$N_SKIP"
         printf '  "Results": [\n'
         local i

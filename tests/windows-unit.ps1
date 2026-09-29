@@ -299,6 +299,124 @@ Assert ($ev.Count -eq 2 -and $ev[0].Id -eq 1 -and $ev[1].Id -eq 1001 -and $ev[1]
 Assert ((ConvertTo-ConsoleText 'Підсумок: OK, звіт Їжак' -Force) -eq 'Pidsumok: OK, zvit Yizhak') 'транслітерація для консолі без кирилиці'
 Assert ((ConvertTo-ConsoleText 'Підсумок') -eq 'Підсумок') 'без потреби текст не змінюється'
 
+Write-Host 'Wazuh agent.conf відповідає списку каналів'
+$std = @('Security', 'System', 'Application')
+foreach ($g in @(@{ File = 'windows'; Dc = $false }, @{ File = 'windows-dc'; Dc = $true })) {
+    $want = @($s.Channels | Where-Object { [bool]$_.DC -eq $g.Dc -and -not $_.NoWazuh -and $std -notcontains $_.N } | ForEach-Object { $_.N })
+    $have = @(([xml]('<r>' + (Get-Content -Raw (Join-Path $root "wazuh/shared/$($g.File)/agent.conf") -Encoding UTF8) + '</r>')).r.agent_config.localfile | ForEach-Object { $_.location })
+    Assert ((($want -join '|') -eq ($have -join '|'))) "wazuh/shared/$($g.File)/agent.conf: ті самі канали й порядок [$(@(Compare-Object $want $have | ForEach-Object { $_.InputObject }) -join ', ')]"
+}
+Assert (@($s.AuditPolicy | Where-Object { $_.Guid -like '0CCE9221-*' -and $_.Workstation -eq 0 -and $_.DomainController -eq 3 }).Count -eq 1) 'аудит Certification Services (AD CS) на серверах і DC'
+
+Write-Host 'Start-SecLogging: одна команда для будь-якої машини'
+$start = Join-Path $root 'windows/Start-SecLogging.ps1'
+$tok = $null; $err = $null
+$null = [System.Management.Automation.Language.Parser]::ParseFile($start, [ref]$tok, [ref]$err)
+Assert ($err.Count -eq 0) 'Start-SecLogging.ps1 без синтаксичних помилок'
+$sbText = [System.IO.File]::ReadAllText($start, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF)
+Assert ($null -ne [scriptblock]::Create($sbText)) 'створюється як scriptblock (як в однорядковій команді)'
+Import-ScriptFunctions $start
+$p = Get-StartPlan 1 ([version]'10.0.22631') $false $false $false $false '10.42'
+Assert ($p.Role -eq 'Workstation' -and -not $p.Gpo -and ($p.Local -join ' ') -eq '-Mode Local -DisablePowerShellV2 -ConfigureWazuh') 'Win10/11: лише локально, Sysmon сучасний, PowerShell 2.0 вимикається'
+Assert (-not ((Get-StartPlan 1 ([version]'10.0.22631') $false $false $false $false '10.42' $true).Local -contains '-DisablePowerShellV2')) '-KeepPowerShellV2 залишає PowerShell 2.0'
+$p = Get-StartPlan 3 ([version]'6.1.7601') $false $false $false $false '10.42'
+Assert ($p.Legacy -and ($p.Local -join ' ') -eq '-Mode Local -AllowLegacySysmon -LegacySysmonVersion 10.42 -ConfigureWazuh' -and -not $p.Gpo) '2008 R2: Sysmon 10.42 для старих ОС'
+$p = Get-StartPlan 3 ([version]'6.1.7601') $false $false $false $true '10.42'
+Assert (($p.Local -join ' ') -eq '-Mode Local -SkipSysmon -ConfigureWazuh') '2008 R2 з -NoLegacySysmon: без Sysmon'
+$p = Get-StartPlan 2 ([version]'10.0.20348') $false $false $false $false '10.2'
+Assert ($p.Role -eq 'DomainController' -and ($p.Gpo -join ' ') -eq '-Mode Domain -NoBuild -SetDomainRootSacl -AllowLegacySysmon -LegacySysmonVersion 10.2 -DisablePowerShellV2') 'DC: локально + GPO + SACL для DCSync, PowerShell 2.0 вимикається і в домені'
+$p = Get-StartPlan 2 ([version]'10.0.20348') $true $false $false $false '10.42'
+Assert (($p.Local -contains '-AuditOnly') -and ($p.Gpo -contains '-WhatIfGpo')) 'DC -AuditOnly: нічого не змінює, GPO лише -WhatIf'
+Assert ($null -eq (Get-StartPlan 2 ([version]'10.0.20348') $false $false $true $false '10.42').Gpo) 'DC -NoGpo: без GPO'
+Assert ((ConvertTo-ArgLine @('-File', 'C:\Program Files\x.ps1', '-Snapshot', 'C:\ProgramData\SecLogging\a.tsv')) -eq '-File "C:\Program Files\x.ps1" -Snapshot C:\ProgramData\SecLogging\a.tsv') 'аргументи дочірнього процесу з пробілами - у лапках'
+
+Write-Host 'Знімки стану "до / після"'
+Import-ScriptFunctions $main
+$before = @('# SecLogging знімок стану; PC1', "# Область`tЕлемент`tЗначення",
+    "AuditPolicy`tLogon`tУспіх", "AuditPolicy`tProcess Creation`tБез аудиту",
+    "EventLog`tSecurity`tувімкнено=True; розмір=20 МБ; режим=Circular",
+    "Registry`tSOFTWARE\x\EnableScriptBlockLogging`t(не задано)", "Sysmon`tСлужба`tне встановлено", "Wazuh`tsecurity`tзбирається")
+$after = @('# SecLogging знімок стану; PC1', "# Область`tЕлемент`tЗначення",
+    "AuditPolicy`tLogon`tУспіх і відмова", "AuditPolicy`tProcess Creation`tУспіх",
+    "EventLog`tSecurity`tувімкнено=True; розмір=768 МБ; режим=Circular",
+    "Registry`tSOFTWARE\x\EnableScriptBlockLogging`t1", "Sysmon`tСлужба`tSysmon64 (Running)", "Sysmon`tВерсія`t15.15",
+    "Wazuh`tsecurity`tзбирається", "Wazuh`tmicrosoft-windows-sysmon/operational`tзбирається")
+$ch = @(Compare-StateSnapshot $before $after)
+$byItem = @{}; foreach ($c in $ch) { $byItem[$c.Item] = $c }
+Assert ($ch.Count -eq 7) "знайдено 7 змін, незмінене пропущено ($($ch.Count))"
+Assert ($byItem['Logon'].Before -eq 'Успіх' -and $byItem['Logon'].After -eq 'Успіх і відмова') 'аудит: було -> стало'
+Assert ($byItem['Security'].After -like '*768 МБ*') 'розмір журналу'
+Assert ($byItem['Версія'].Before -eq '(не було)' -and $byItem['microsoft-windows-sysmon/operational'].Before -eq '(не було)') 'нові елементи позначено "(не було)"'
+Assert (@($ch | Where-Object { $_.Area -eq 'Wazuh' -and $_.Item -eq 'security' }).Count -eq 0) 'незмінений рядок не потрапляє у звіт'
+Assert (@(Compare-StateSnapshot $after $after).Count -eq 0) 'однакові знімки - змін немає'
+$sub = @(Get-AuditSubcategoryNames)
+Assert ($sub.Count -eq 59 -and @($sub | ForEach-Object { $_.Split('|')[0] } | Sort-Object -Unique).Count -eq 59) 'назви всіх 59 підкатегорій аудиту для знімка (замість GUID)'
+$known = @{}; foreach ($x in $sub) { $kv = $x.Split('|'); $known[$kv[0]] = $kv[1] }
+Assert (@($s.AuditPolicy | Where-Object { $known[$_.Guid.Substring(4, 4)] -ne $_.Name }).Count -eq 0) 'назви в таблиці аудиту скрипта збігаються з довідником'
+$tb = [IO.Path]::GetTempFileName(); $ta = [IO.Path]::GetTempFileName(); $to = Join-Path ([IO.Path]::GetTempPath()) ('changes-' + [guid]::NewGuid() + '.txt')
+[IO.File]::WriteAllLines($tb, [string[]]$before); [IO.File]::WriteAllLines($ta, [string[]]$after)
+$n = Write-StateComparison $tb $ta $to 6>$null
+$txt = [IO.File]::ReadAllText($to); $csvText = [IO.File]::ReadAllText([IO.Path]::ChangeExtension($to, '.csv'))
+Assert ($n -eq 7 -and $txt -match 'Змін: 7' -and $txt -match 'було:  Успіх' -and $csvText -match '^\W*Область;Елемент;Було;Стало') 'звіт .txt і .csv записано'
+Remove-Item $tb, $ta, $to, ([IO.Path]::ChangeExtension($to, '.csv')) -Force
+
+Write-Host 'Однорядкова команда в README'
+foreach ($rd in 'README.md', 'README.uk.md') {
+    $ol = @(Get-Content (Join-Path $root $rd) -Encoding UTF8 | Where-Object { $_ -like 'powershell -NoProfile -ExecutionPolicy Bypass -Command "*Start-SecLogging.ps1*' })
+    Assert ($ol.Count -ge 2 -and @($ol | Where-Object { $_ -match '\$' }).Count -eq 0) "${rd}: рядок без змінних (`$) - однаково працює в PowerShell і cmd"
+    $inner = ([regex]::Match($ol[0], '-Command "(.*)"')).Groups[1].Value
+    $t = $null; $e = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($inner, [ref]$t, [ref]$e)
+    Assert ($e.Count -eq 0) "${rd}: внутрішня команда розбирається без помилок"
+}
+
+Write-Host 'Змінні рівня скрипта не перекриваються (PowerShell не розрізняє регістр імен)'
+foreach ($f in 'windows/Set-SecurityLogging.ps1', 'windows/Start-SecLogging.ps1', 'windows/Install-SecLogging.ps1', 'windows/lab/Test-LegacySysmon.ps1') {
+    $tk = $null; $er = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root $f), [ref]$tk, [ref]$er)
+    $vars = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.IsScript }, $true) | ForEach-Object { ($_.VariablePath.UserPath -replace '^[^:]+:', '').ToLower() } | Sort-Object -Unique)
+    $bad = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true) | Where-Object {
+            $l = $_.Left; if ($l -is [System.Management.Automation.Language.ConvertExpressionAst]) { $l = $l.Child }
+            $inFn = $false; $pp = $_.Parent; while ($pp) { if ($pp -is [System.Management.Automation.Language.FunctionDefinitionAst]) { $inFn = $true; break }; $pp = $pp.Parent }
+            (-not $inFn) -and $l -is [System.Management.Automation.Language.VariableExpressionAst] -and -not $l.VariablePath.IsScript -and ($vars -contains $l.VariablePath.UserPath.ToLower())
+        } | ForEach-Object { '{0} (рядок {1})' -f $_.Left.Extent.Text, $_.Extent.StartLineNumber })
+    Assert ($bad.Count -eq 0) "${f}: немає `$x = ... поверх `$Script:x [$($bad -join ', ')]"
+}
+
+Write-Host 'Повторно використаний пакет отримує свіжий скрипт'
+Import-ScriptFunctions $installer
+$srcD = Join-Path ([IO.Path]::GetTempPath()) ('src-' + [guid]::NewGuid()); $pkgD = Join-Path ([IO.Path]::GetTempPath()) ('pkg-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $srcD, $pkgD | Out-Null
+Set-Content -LiteralPath (Join-Path $srcD 'Set-SecurityLogging.ps1') -Value "`$ScriptVersion = '1.1.0'"
+Set-Content -LiteralPath (Join-Path $pkgD 'Set-SecurityLogging.ps1') -Value "`$ScriptVersion = '1.0.0'"
+$u = Update-PackageScript $srcD $pkgD
+Assert ($u.Updated -and $u.From -eq '1.0.0' -and $u.To -eq '1.1.0' -and (Get-ScriptVersion (Join-Path $pkgD 'Set-SecurityLogging.ps1')) -eq '1.1.0') 'стара копія в пакеті замінюється (1.0.0 -> 1.1.0)'
+Assert (-not (Update-PackageScript $srcD $pkgD).Updated) 'однаковий скрипт не копіюється вдруге'
+Assert ((Get-ScriptVersion $main) -match '^\d+\.\d+\.\d+$') "версія основного скрипта читається ($(Get-ScriptVersion $main))"
+Remove-Item -LiteralPath $srcD, $pkgD -Recurse -Force
+
+Write-Host 'Синхронізація часу, LSASS, закріплений реліз'
+Import-ScriptFunctions $main
+Assert ((Test-TimeSync @{ Type = 'NT5DS'; StartMode = 'Auto'; State = 'Running' }).Status -eq 'OK') 'час від домену - OK'
+Assert ((Test-TimeSync @{ Type = 'NTP'; NtpServer = 'time.windows.com,0x9'; StartMode = 'Manual'; State = 'Stopped' }).Status -eq 'OK') 'NTP із ручним запуском (так у робочій групі) - OK'
+Assert ((Test-TimeSync @{ Type = 'NoSync'; StartMode = 'Auto'; State = 'Running' }).Status -eq 'Warning') 'NoSync - попередження'
+Assert ((Test-TimeSync @{ Type = 'NTP'; StartMode = 'Disabled'; State = 'Stopped' }).Status -eq 'Warning') 'служба часу вимкнена - попередження'
+$lsass = @($s.Registry | Where-Object { $_.Path -like '*Image File Execution Options\LSASS.exe' -and $_.Name -eq 'AuditLevel' -and $_.Value -eq 8 -and -not $_.DC })
+Assert ($lsass.Count -eq 1) 'аудит LSASS (AuditLevel=8) на всіх машинах і в GPO'
+$rel = 'v' + (Get-ScriptVersion $main)
+$linuxText = [IO.File]::ReadAllText((Join-Path $root 'linux/set-security-logging.sh'))
+$installText = [IO.File]::ReadAllText((Join-Path $root 'linux/install.sh'))
+$startText = [IO.File]::ReadAllText($start)
+Assert (('v' + ([regex]::Match($linuxText, 'SCRIPT_VERSION="([^"]+)"')).Groups[1].Value) -eq $rel) "версії Windows і Linux однакові ($rel)"
+Assert (([regex]::Match($startText, "\[string\]\`$Ref = '([^']+)'")).Groups[1].Value -eq $rel) "Start-SecLogging.ps1 завантажує реліз $rel"
+Assert (([regex]::Match($installText, 'REF="([^"]+)"')).Groups[1].Value -eq $rel) "linux/install.sh завантажує реліз $rel"
+Assert (([regex]::Match([IO.File]::ReadAllText($installer), "\[string\]\`$RepoRef = '([^']+)'")).Groups[1].Value -eq $rel) "Install-SecLogging.ps1 -Fetch завантажує реліз $rel"
+foreach ($rd in 'README.md', 'README.uk.md') {
+    $txt = [IO.File]::ReadAllText((Join-Path $root $rd))
+    $urls = @([regex]::Matches($txt, 'raw\.githubusercontent\.com/egwyl666/sec_journal_on/([^/]+)/(windows/Start-SecLogging\.ps1|linux/install\.sh)') | ForEach-Object { $_.Groups[1].Value })
+    Assert ($urls.Count -ge 4 -and @($urls | Where-Object { $_ -ne $rel }).Count -eq 0) "${rd}: однорядкові команди вказують на $rel [$($urls | Sort-Object -Unique)]"
+}
+
 Write-Host ''
 Write-Host "Пройдено: $script:passed  Не пройдено: $script:failed"
 if ($script:failed) { exit 1 }

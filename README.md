@@ -14,8 +14,9 @@ Every script has a read-only mode (`-AuditOnly` / `--check`) that shows what it 
 ```
 windows/Set-SecurityLogging.ps1   single script for any Windows (WS / Server / DC), PowerShell 2.0+
 windows/New-SecLoggingGpo.ps1     domain GPO add-on (run on a DC)
+windows/Start-SecLogging.ps1      one command for anyone: download, detect, configure, before/after report
 windows/Install-SecLogging.ps1    automation: download -> build package -> install / share / GPO
-linux/set-security-logging.sh     single script for Linux (Debian/Ubuntu, RHEL/Rocky/Alma, SUSE)
+linux/set-security-logging.sh     single script for any Linux (deb, rpm, SUSE, Arch, Alpine families; see the table)
 linux/install.sh                  automation: offline bundle (build) and install (online or --from)
 vendor/sysmon/10.42, 10.2/        Sysmon for Windows 7 / 2008 / 2008 R2 (verified, pinned)
 vendor/sysmon-config/             SwiftOnSecurity configs for those versions (CC BY 4.0, pinned)
@@ -27,6 +28,77 @@ tests/                            tests (pwsh + docker)
 > Help text, comments and console messages inside the scripts are in Ukrainian. Machine-readable values stay in English: statuses (`OK`, `Changed`, `WouldChange`, `Warning`, `Error`, `Skipped`), JSON keys, parameter names, log channel names. This keeps SIEM rules and filters simple.
 > The `.ps1` files are saved as **UTF-8 with BOM**. Without the BOM, Windows PowerShell 5.1/2.0 reads the Cyrillic text incorrectly. If you edit the scripts, keep the BOM.
 
+## One command (no decisions needed)
+
+Open **PowerShell or cmd as administrator** (Windows; the same line works in both) or a root shell (Linux), paste one line, and wait for `DONE`. The machine needs internet access.
+
+**Windows** (10/11, Server 2008 R2 … 2025, domain controllers):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
+```
+
+**Linux** (any distribution from the table below; the line uses `curl`, or `wget` where there is no `curl`, e.g. Ubuntu Desktop):
+
+```bash
+(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/linux/install.sh) | sudo bash
+```
+
+What happens:
+
+1. The scripts are downloaded from GitHub.
+2. The machine type is detected: workstation, server, domain controller, old OS (2008 / 2008 R2 / Win7), Linux distribution.
+3. A snapshot of the current state is saved ("before").
+4. Everything that is missing is enabled: event logs and their sizes, audit policy, PowerShell logging, Sysmon (Windows), auditd and journald (Linux), Wazuh collection if the agent is installed. On a **domain controller** the domain GPOs are also created, so every domain machine configures itself at boot, and DCSync auditing is enabled.
+5. A second snapshot is saved ("after"), and **everything that changed is written as "before → after"**.
+
+Results:
+
+| | Windows | Linux |
+|---|---|---|
+| What changed (before → after) | `C:\ProgramData\SecLogging\changes\<time>-changes.txt` (+ `.csv` for Excel) | `/var/log/seclogging/changes/<time>-changes.txt` |
+| Full snapshots | `...\changes\<time>-before.tsv`, `<time>-after.tsv` | same folder |
+| Detailed report | `C:\ProgramData\SecLogging\last-report.json` | `/var/log/seclogging/last-report.json` |
+
+Running it again is safe: only what is missing changes, and a second run reports `Змін немає` (no changes).
+
+View what changed after a run:
+
+```powershell
+# Windows (PowerShell)
+Get-Content (Get-ChildItem C:\ProgramData\SecLogging\changes\*-changes.txt | Sort-Object LastWriteTime | Select-Object -Last 1).FullName -Encoding UTF8
+```
+```bash
+# Linux
+sudo sh -c 'cat "$(ls -t /var/log/seclogging/changes/*-changes.txt | head -1)"'
+```
+
+Example (Ubuntu, first run):
+
+```
+[auditd.conf]
+  max_log_file
+      було:  (не задано)
+      стало: 100
+```
+
+Check only, change nothing:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF))) -AuditOnly"
+```
+```bash
+(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/linux/install.sh) | sudo bash -s -- --check
+```
+
+No internet on the machine: download `https://github.com/egwyl666/sec_journal_on/archive/refs/tags/v1.3.0.zip` elsewhere, copy it over and run `powershell -ExecutionPolicy Bypass -File <unpacked>\windows\Start-SecLogging.ps1 -Source <path to the zip>` (Linux: the offline bundle, see below).
+
+To compare any two snapshots later: `Set-SecurityLogging.ps1 -CompareBefore a.tsv -CompareAfter b.tsv -CompareOut changes.txt` / `set-security-logging.sh --compare a.tsv b.tsv`.
+
+### Versions and updates
+
+The commands above are pinned to a **release** (`v1.3.0`), not to the latest commit: a change in the repository does not reach machines until a new release is published, and a compromised branch cannot push code to every machine. To roll out a new release, replace `v1.3.0` in the command with the new tag. `-Ref HEAD` (Windows) / `-s -- --ref HEAD` (Linux) runs the latest development version for testing.
+
 ## Quick start (automated)
 
 The installers do "download → build package → install" in one command. You do not need to run the individual steps below unless you want to.
@@ -37,7 +109,7 @@ The installers do "download → build package → install" in one command. You d
 # machine with internet: download the installer from GitHub and run it (paste into PowerShell)
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
 $f = "$env:TEMP\Install-SecLogging.ps1"
-(New-Object Net.WebClient).DownloadFile('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Install-SecLogging.ps1', $f)
+(New-Object Net.WebClient).DownloadFile('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/windows/Install-SecLogging.ps1', $f)
 powershell -ExecutionPolicy Bypass -File $f -Fetch -AuditOnly
 
 # from a clone of the repository (first allow scripts in this window only;
@@ -60,25 +132,25 @@ Get-ChildItem -Recurse | Unblock-File
 | `Domain` | builds the package and runs `New-SecLoggingGpo.ps1` with it (`-WhatIfGpo` for a dry run, `-LinkTargets`, `-SetDomainRootSacl`) |
 
 - A valid package is reused. Use `-Rebuild` to build it again, or `-NoBuild` on a machine without internet to use an existing package only.
-- `-Fetch` downloads the scripts as a zip from GitHub (`-RepoRef` picks a branch/tag/commit, default `HEAD`).
+- `-Fetch` downloads the scripts as a zip from GitHub (`-RepoRef` picks a branch/tag/commit, default the pinned release `v1.3.0`).
 - All `Set-SecurityLogging.ps1` switches (`-AuditOnly`, `-SkipSysmon`, `-UpgradeSysmon`, `-DisablePowerShellV2`, `-ConfigureWazuh`, `-AllowLegacySysmon`, `-LegacySysmonVersion`, `-ReinstallSysmon`, `-TranscriptionPath`, …) are passed through.
 
 **Linux** (root):
 
 ```bash
 # one-liner on a host with internet
-curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh -o install.sh && sudo bash install.sh --fetch --check
+curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/linux/install.sh -o install.sh && sudo bash install.sh --fetch --check
 
 # from a clone
 sudo ./linux/install.sh --check                      # check only
 sudo ./linux/install.sh --configure-wazuh            # install online
-sudo ./linux/install.sh build --with-sysmon          # offline bundle for this distro/version/arch
-sudo ./seclogging-bundle-*/install.sh --from ./seclogging-bundle-ubuntu-22.04-x86_64 --with-sysmon   # on the offline host
+sudo ./linux/install.sh build                        # offline bundle for this distro/version/arch
+sudo ./seclogging-bundle-*/install.sh --from ./seclogging-bundle-ubuntu-22.04-x86_64   # on the offline host
 ```
 
 `build` produces a bundle folder with:
 - both scripts;
-- `auditd` and `sysmon` packages together with their **full dependency tree**;
+- the `auditd` package together with its **full dependency tree**;
 - `SHA256SUMS`;
 - `bundle.info`, which records the distro, version and architecture it was built for.
 
@@ -179,7 +251,7 @@ Sometimes a GPO already sets smaller log sizes or weaker audit settings than our
 **Event logs.** Disabled logs are enabled. Sizes only grow. Retention is set to *Overwrite events as needed*, so logs never stop or fill the disk.
 
 | Class | Logs | WS | Server | DC |
-|---|---|---|---|---|
+|---|---|---|---|
 | Security | Security | 768 MB | 1.5 GB | 3 GB |
 | Sysmon | Microsoft-Windows-Sysmon/Operational | 512 MB | 1 GB | 1.5 GB |
 | PowerShell | PowerShell/Operational, Windows PowerShell, PowerShellCore/Operational | 384 MB | 768 MB | 1 GB |
@@ -197,7 +269,11 @@ If the growth does not fit into 50% of the free space on the system drive, the p
 - `ProcessCreationIncludeCmdLine_Enabled=1`;
 - ScriptBlock and Module logging (`*`) for Windows PowerShell and PowerShell 7;
 - `AuditReceivingNTLMTraffic=2`, `RestrictSendingNTLMTraffic=1` (audit only);
-- on DCs, `AuditNTLMInDomain=7` and `16 LDAP Interface Events=2`.
+- on DCs, `AuditNTLMInDomain=7` and `16 LDAP Interface Events=2`;
+- `Image File Execution Options\LSASS.exe\AuditLevel=8`: events 3065/3066 in CodeIntegrity/Operational when an unsigned module tries to load into LSASS (audit only, nothing is blocked);
+- on an AD CS certificate authority, `AuditFilter=127` (without it the CA logs nothing; takes effect after `certsvc` restarts).
+
+**Time synchronization** is checked, not changed: `NoSync` or a disabled W32Time service gives a warning, because events from different machines cannot be correlated when clocks drift.
 
 ### PowerShell 2.0: why disable it
 
@@ -205,7 +281,7 @@ The PowerShell 2.0 engine predates all the protection mechanisms. It has **no** 
 
 * **Win10/11 and Server 2016+:** the `MicrosoftWindowsPowerShellV2(Root)` feature is present but almost nobody needs it. Microsoft removed it in Win11 24H2 and Server 2025. Only very old software that explicitly calls `-Version 2` breaks, such as old Exchange 2010 or SCCM scripts.
 * **2008/2008 R2:** 2.0 is the main PowerShell and cannot be removed. The script takes this into account.
-* **Default behaviour:** the script only **warns**. It removes the feature only with `-DisablePowerShellV2`. Run `-AuditOnly` across the fleet first to see how many machines have it enabled.
+* **Default behaviour:** the one-command run (`Start-SecLogging.ps1`, and the domain GPO it creates) **removes** the feature on Win8/2012 and newer; `-KeepPowerShellV2` keeps it. `Set-SecurityLogging.ps1` on its own only warns unless given `-DisablePowerShellV2`.
 
 ### Legacy systems (2008 / 2008 R2 / Win7)
 
@@ -257,7 +333,7 @@ The PowerShell 2.0 engine predates all the protection mechanisms. It has **no** 
    mkdir C:\SecLab\updates & net share SecLab=C:\SecLab /grant:Everyone,FULL & icacls C:\SecLab /grant Everyone:(OI)(CI)F & netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes & ipconfig
    ```
 2. **Host** (browser, no admin):
-   - download the repository ZIP: <https://github.com/egwyl666/sec_journal_on/archive/HEAD.zip>;
+   - download the repository ZIP: <https://github.com/egwyl666/sec_journal_on/archive/refs/tags/v1.3.0.zip>;
    - download KB4474419 and KB4490628 (Windows Server 2008 R2, x64) from the Microsoft Update Catalog;
    - in Explorer, open `\\<VM IP>\SecLab` (log in as `<VM>\Administrator`), copy the ZIP there and the `.msu` files into `updates`.
 3. **VM**: right-click the ZIP → *Extract All…* → `C:\SecLab`, then run:
@@ -277,27 +353,40 @@ SwiftOnSecurity `sysmonconfig-export.xml`, pinned to commit `1836897` (SHA256 in
 ```bash
 sudo ./linux/set-security-logging.sh --check          # report only
 sudo ./linux/set-security-logging.sh                  # apply
-sudo ./linux/set-security-logging.sh --with-sysmon --configure-wazuh
+sudo ./linux/set-security-logging.sh --configure-wazuh
 ```
 
 | What | How |
 |---|---|
-| Detection | `/etc/os-release` gives the deb/rpm/suse family. `graphical.target` means workstation, otherwise server. Also checks for a container and the free space on `/var` |
+| Detection | `/etc/os-release` (`ID`, then `ID_LIKE`, so derivatives are covered), otherwise by the package manager present. Also detects the init system (systemd / OpenRC / SysV), a container and the free space on `/var`. `graphical.target` means workstation, otherwise server |
 | auditd | installs the package. `auditd.conf`: `max_log_file` 50/100 MB × `num_logs` 10, `ROTATE`, `ENRICHED` (auditd ≥ 2.6) |
 | Rules | `/etc/audit/rules.d/50-seclogging.rules`: identity, sudoers, PAM, SSH, cron/at/systemd/rc/profile, ld.so.preload, kernel modules, hostname, time, ptrace injection, mounts, execve in user sessions (key `audit-wazuh-c` for the stock Wazuh rules), execve by web server accounts (`webshell`). `-w` lines are written only if the path exists. If immutable mode (`-e 2`) is on, the script warns that a reboot is needed. `--immutable` adds `-e 2` itself |
 | journald | `Storage=persistent`, `SystemMaxUse` 1G (WS) / 2G (server) via a drop-in, only increased |
-| Auth log | checks for rsyslog and `/var/log/auth.log` / `/var/log/secure`, and that logrotate keeps at least 7 days |
-| Sysmon for Linux | `--with-sysmon`: installs from packages.microsoft.com (GPG-signed) or offline via `--sysmon-package-dir DIR` (a `SHA256SUMS` file is required). Uses a built-in config: processes, network except loopback, file creation in persistence locations |
+| Auth log | checks for rsyslog and the auth log actually present (`/var/log/auth.log`, `/var/log/secure`, otherwise the family default), and that logrotate keeps at least 7 days |
+| sshd | `LogLevel VERBOSE`, so the auth log records the fingerprint of the key used to log in. A drop-in `sshd_config.d/01-seclogging.conf` when `Include` is at the top of `sshd_config`, otherwise a line at the top of `sshd_config` (backup kept). `sshd -t` must pass, otherwise the change is rolled back; then `reload` |
+| Time | checks NTP synchronization (`timedatectl`, `chronyc`, `ntpstat`) and warns if the clock is not synchronized; changes nothing |
 | Wazuh | checks the agent and whether audit/auth logs are collected. With `--configure-wazuh`, appends a managed block to `ossec.conf` |
 
 The report goes to `/var/log/seclogging/last-report.json`, and a summary line is sent to syslog (tag `seclogging`).
 
-**Is Sysmon for Linux worth it?** Moderately. auditd remains the foundation. Sysmon adds network connections tied to processes, which is noisy and awkward with auditd, and the same event schema as Windows. The downsides:
-- it needs eBPF (kernel ≥ 4.15);
-- the package is not in the distribution repositories;
-- events arrive in syslog as XML, and **Wazuh needs extra decoders** for them.
+### Supported distributions
 
-That is why it is off by default. Try it on a couple of servers and look at the event volume first.
+One script for all of them: it checks what the host is and picks the package manager, package names, log paths and service commands itself. Nothing needs to be told about the distribution.
+
+| Family | Distributions | Package manager | Offline bundle (`install.sh build`) |
+|---|---|---|---|
+| deb | Ubuntu, Debian, Mint, Astra, Pop!_OS, Kali and other derivatives | apt | yes |
+| rpm | RHEL, CentOS 7/8/Stream, Rocky, Alma, Oracle, Fedora, Amazon Linux | dnf / yum | yes |
+| suse | SLES, openSUSE Leap/Tumbleweed | zypper | no (online only) |
+| arch | Arch, Manjaro, EndeavourOS | pacman | no (online only) |
+| alpine | Alpine (OpenRC, needs `apk add bash`) | apk | no (online only) |
+| other | anything with `/etc/os-release` | none | no |
+
+On an unknown distribution auditd must already be installed. The script then configures everything else and reports a warning instead of installing packages.
+
+CentOS 7 and 8 are end-of-life: their default repositories no longer work. The script says so and suggests `vault.centos.org` or the offline bundle.
+
+**Why no Sysmon for Linux.** The built-in tools already cover what matters: auditd records process execution with the full command line and user, file and configuration changes, kernel modules and privilege escalation, and journald/syslog cover logins, sudo and services. Wazuh parses all of this out of the box. Sysmon for Linux would add another agent with an eBPF sensor (kernel ≥ 4.15), packages from outside the distribution repositories, and XML events that Wazuh cannot decode without custom decoders.
 
 ---
 
@@ -334,21 +423,23 @@ Alerts worth creating right away:
 |---|---|---|
 | Syntax of both `.ps1` files, PSScriptAnalyzer (Warning/Error) | pwsh 7 on Linux | clean |
 | PowerShell 2.0: no PS3+ constructs | grep + PSUseCompatibleSyntax | clean |
-| Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op | pwsh 7 | 81/81 |
-| `tests/linux-docker.sh`: check → apply → second apply with no changes | Ubuntu 24.04 and 20.04 with real auditd; Debian 12 and Rocky 9 with a stub auditctl (package mirrors were unreachable from the sandbox) | pass |
+| Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op, PowerShell 2.0 fallbacks | pwsh 7 | 134/134 |
+| `tests/linux-docker.sh`: check → apply → second apply with no changes | Ubuntu 24.04 / 20.04, Mint 21.3, Oracle Linux 9 with real auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch with a stub auditctl (their mirrors were unreachable from the sandbox) | pass (13 distributions) |
+| auditd installed by the script itself through the package manager | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | pass |
+| Server 2008 R2 lab: Sysmon 10.42 with the schema 4.22 config | VM, PowerShell 2.0 | running, events logged; stable after reboot (`-CollectOnly`: no crashes) |
+| One command on real machines: before/after report, second run with no changes | Windows 10 Pro 22H2 (ru-RU), Ubuntu 26.04 | pass |
+| sshd `LogLevel VERBOSE`: with and without `Include`, with a `Match` block; `sshd -t` passes; second run is a no-op | Ubuntu 24.04, Oracle Linux 9 | pass |
 | Generated auditd rules loaded into a real kernel | privileged container | 57/57 rules accepted |
-| Installing sysmonforlinux from packages.microsoft.com | Ubuntu 22.04 | installs (1.5.3) |
-| `tests/linux-bundle.sh`: `install.sh build` → install from the bundle on a clean container **without network** → second run with no changes → modified bundle rejected | Ubuntu 22.04 (with Sysmon), Ubuntu 24.04 | pass |
+| `tests/linux-bundle.sh`: `install.sh build` → install from the bundle on a clean container **without network** → second run with no changes → modified bundle rejected | Ubuntu 22.04, Ubuntu 24.04, Oracle Linux 9 (rpm) | pass |
 | `install.sh --fetch` downloads the main script from GitHub | Ubuntu 24.04 | pass |
 | Sysmon 10.42 and 10.2 in `vendor/`: Authenticode (Microsoft, valid at timestamp), FileVersion, pinned hash | osslsigncode + unit test | pass |
 
 **Not verified yet (needs a real lab):**
 - all Windows code that talks to the OS: wevtutil, auditpol, Sysmon installation, registry, DISM;
 - `New-SecLoggingGpo.ps1` against a real AD/SYSVOL;
-- behaviour on Server 2008/R2, including Sysmon 10.42/10.2 there (use the lab test above);
 - `Install-SecLogging.ps1` on real Windows (only its helper functions are unit-tested);
-- `linux/install.sh build` on the RHEL family (package mirrors were unreachable from the sandbox);
-- Sysmon for Linux on a host with systemd (in a container, sysmon accepts any config without validating it).
+- Alpine (no mirrors in the sandbox) and package installation on SUSE, Arch, Amazon Linux, CentOS 7;
+- `install.sh build` on CentOS 7 (`repotrack`);
 
 Suggested order:
 
@@ -359,5 +450,6 @@ Suggested order:
 ```bash
 pwsh -NoProfile -File tests/windows-unit.ps1
 ./tests/linux-docker.sh          # IMAGES="ubuntu:24.04 debian:12" to pick images
-./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 WITH_SYSMON=1
+./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 or IMAGE=oraclelinux:9
+# behind an HTTPS-only proxy: CA_FILE=/path/ca.crt PROXY=$HTTPS_PROXY ./tests/linux-docker.sh
 ```

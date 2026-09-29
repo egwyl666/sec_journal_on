@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
 # install.sh - автоматизація "завантажити -> зібрати комплект -> встановити" для Linux.
 #
+# Одна команда (root, потрібен інтернет):
+#   (curl -fsSL URL 2>/dev/null || wget -qO- URL) | sudo bash
+#   де URL = https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/linux/install.sh
+#   (працює і там, де є лише curl - мінімальні RHEL, і де лише wget - Ubuntu Desktop)
+# Знімає стан "до" і "після" і записує, що змінилося: /var/log/seclogging/changes/<час>-changes.txt
+#
 # Використання:
 #   sudo ./install.sh [install] [параметри] [параметри set-security-logging.sh]
-#   sudo ./install.sh build [--out DIR] [--with-sysmon] [--no-auditd]
+#   sudo ./install.sh build [--out DIR] [--no-auditd]
 #
 # Команди:
 #   install (за замовчуванням)  налаштувати цей хост (онлайн або з комплекту --from)
 #   build                       зібрати офлайн-комплект для хостів без інтернету
-#                               (той самий дистрибутив, версія та архітектура, що й тут)
+#                               (той самий дистрибутив, версія та архітектура, що й тут;
+#                               сімейства deb і rpm: Ubuntu/Debian/Mint/Astra, RHEL/CentOS/Rocky/Alma/Oracle/Fedora/Amazon)
 # Параметри:
 #   --from DIR       install: взяти комплект з DIR (перевіряється SHA256SUMS)
 #   --out DIR        build: тека комплекту (типово ./seclogging-bundle-<os>-<версія>-<arch>)
-#   --with-sysmon    build: додати пакети Sysmon for Linux; install: встановити Sysmon
 #   --no-auditd      build: не додавати пакети auditd
 #   --fetch          завантажити свіжий set-security-logging.sh з GitHub
-#   --ref REF        гілка/тег/коміт для --fetch (типово HEAD)
+#   --ref REF        гілка/тег/коміт для --fetch (типово закріплений реліз; HEAD - остання версія)
+#   --no-wazuh       не дописувати збір журналів в ossec.conf агента Wazuh (типово дописує, якщо агент є)
 #   -h|--help
 # Усі інші параметри (--check, --configure-wazuh, --profile, --immutable, --quiet, ...)
 # передаються в set-security-logging.sh без змін.
@@ -24,18 +31,20 @@ set -u
 umask 022
 
 REPO_RAW="https://raw.githubusercontent.com/egwyl666/sec_journal_on"
-REF="HEAD"
+REF="v1.3.0"   # закріплений реліз; --ref HEAD - остання версія
 CMD="install"
 FROM=""
 OUT=""
-WITH_SYSMON=0
 WITH_AUDITD=1
 FETCH=0
+WAZUH=1
+# запуск через "curl ... | bash": поруч немає файлів - основний скрипт завантажуємо
+[ -f "$0" ] || FETCH=1
 PASS=()
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 
-usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
-die() { echo "ПОМИЛКА: $*" >&2; exit "${2:-2}"; }
+usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
+die() { echo "ПОМИЛКА: $1" >&2; exit "${2:-2}"; }
 info() { echo "==> $*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -44,9 +53,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --from) FROM="${2:-}"; shift ;;
         --out) OUT="${2:-}"; shift ;;
-        --with-sysmon) WITH_SYSMON=1 ;;
+        --with-sysmon) die "Sysmon for Linux більше не підтримується: достатньо auditd і journald" 64 ;;
         --no-auditd) WITH_AUDITD=0 ;;
         --fetch) FETCH=1 ;;
+        --no-wazuh) WAZUH=0 ;;
         --ref) REF="${2:-}"; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; PASS+=("$@"); break ;;
@@ -68,10 +78,17 @@ HOST_VER=$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")
 HOST_ARCH=$(uname -m)
 FAMILY="unknown"
 case " $HOST_ID $HOST_LIKE " in
+    *" altlinux "*) FAMILY="alt" ;;
     *" debian "*|*" ubuntu "*) FAMILY="deb" ;;
-    *" rhel "*|*" fedora "*|*" centos "*) FAMILY="rpm" ;;
+    *" rhel "*|*" fedora "*|*" centos "*|*" amzn "*) FAMILY="rpm" ;;
     *" suse "*|*" sles "*|*" opensuse "*) FAMILY="suse" ;;
+    *" arch "*|*" archlinux "*) FAMILY="arch" ;;
+    *" alpine "*) FAMILY="alpine" ;;
 esac
+if [ "$FAMILY" = "unknown" ]; then
+    if have apt-get && have dpkg; then FAMILY="deb"; elif have dnf || have yum; then FAMILY="rpm"
+    elif have zypper; then FAMILY="suse"; elif have pacman; then FAMILY="arch"; elif have apk; then FAMILY="alpine"; fi
+fi
 
 download() { # download URL FILE
     if have curl; then curl -fsSL -o "$2" "$1"; elif have wget; then wget -q -O "$2" "$1"; else return 1; fi
@@ -92,28 +109,6 @@ get_main_script() {
 
 # ------------------------------------------------------------------ build
 
-ms_repo_url() {
-    local major="${HOST_VER%%.*}"
-    case "$HOST_ID" in
-        ubuntu) echo "https://packages.microsoft.com/config/ubuntu/$HOST_VER/packages-microsoft-prod.deb" ;;
-        debian) echo "https://packages.microsoft.com/config/debian/$major/packages-microsoft-prod.deb" ;;
-        rhel|rocky|almalinux|centos|ol) echo "https://packages.microsoft.com/config/rhel/$major/packages-microsoft-prod.rpm" ;;
-        fedora) echo "https://packages.microsoft.com/config/fedora/$major/packages-microsoft-prod.rpm" ;;
-        *) echo "" ;;
-    esac
-}
-
-add_ms_repo() {
-    local url tmp; url=$(ms_repo_url)
-    [ -n "$url" ] || die "немає репозиторію packages.microsoft.com для $HOST_ID $HOST_VER"
-    tmp=$(mktemp -d)
-    case "$FAMILY" in
-        deb) download "$url" "$tmp/p.deb" && dpkg -i "$tmp/p.deb" >/dev/null && apt-get update -qq >/dev/null ;;
-        rpm) download "$url" "$tmp/p.rpm" && rpm -Uvh --replacepkgs "$tmp/p.rpm" >/dev/null ;;
-    esac || die "не вдалося додати репозиторій Microsoft ($url)"
-    rm -rf "$tmp"
-}
-
 deb_closure() { # deb_closure PACKAGE... -> імена всіх пакетів дерева залежностей (без віртуальних)
     apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks \
         --no-replaces --no-enhances "$@" 2>/dev/null | grep -E '^[a-z0-9]' | sort -u
@@ -129,9 +124,19 @@ pkg_download() { # pkg_download DIR PACKAGE... - пакети разом з ус
             # shellcheck disable=SC2086
             (cd "$dir" && apt-get -o APT::Sandbox::User=root download $all >/dev/null) ;;
         rpm)
-            if have dnf; then dnf download -q --resolve --alldeps --destdir "$dir" "$@" >/dev/null
-            elif have yumdownloader; then yumdownloader -q --resolve --destdir "$dir" "$@" >/dev/null
-            else return 1; fi ;;
+            if have dnf; then
+                # dnf5 (Fedora 41+) не має -q у download; плагін download потрібен у dnf4
+                dnf download --resolve --alldeps --destdir "$dir" "$@" >/dev/null 2>&1 \
+                    || { dnf install -y -q 'dnf-command(download)' >/dev/null 2>&1 && dnf download --resolve --alldeps --destdir "$dir" "$@" >/dev/null 2>&1; }
+            else
+                # yum (CentOS 7): repotrack завантажує повне дерево залежностей, yumdownloader - лише відсутні тут
+                have repotrack || yum install -y -q yum-utils >/dev/null 2>&1
+                if have repotrack; then repotrack -a "$(uname -m)" -p "$dir" "$@" >/dev/null 2>&1
+                elif have yumdownloader; then yumdownloader -q --resolve --destdir "$dir" "$@" >/dev/null
+                else return 1; fi
+                find "$dir" -name '*.i686.rpm' -delete 2>/dev/null
+            fi
+            ls "$dir"/*.rpm >/dev/null 2>&1 ;;
         *) return 1 ;;
     esac
 }
@@ -143,7 +148,8 @@ write_sums() { # write_sums DIR -> DIR/SHA256SUMS для всіх файлів (
 }
 
 do_build() {
-    [ "$FAMILY" = "deb" ] || [ "$FAMILY" = "rpm" ] || die "build підтримує лише deb/rpm (зараз: $HOST_ID)"
+    [ "$FAMILY" = "deb" ] || [ "$FAMILY" = "rpm" ] \
+        || die "офлайн-комплект підтримує сімейства deb і rpm (цей хост: $HOST_ID, сімейство $FAMILY). Онлайн-встановлення працює: sudo ./install.sh"
     [ -n "$OUT" ] || OUT="$PWD/seclogging-bundle-$HOST_ID-$HOST_VER-$HOST_ARCH"
     mkdir -p "$OUT" || die "не вдалося створити $OUT"
     OUT=$(cd "$OUT" && pwd)
@@ -164,13 +170,6 @@ do_build() {
         fi
         write_sums "$OUT/auditd"
         echo "    auditd: $(find "$OUT/auditd" -name '*.deb' -o -name '*.rpm' | wc -l) пакет(и)"
-    fi
-    if [ "$WITH_SYSMON" -eq 1 ]; then
-        rm -rf "$OUT/sysmon"
-        add_ms_repo
-        pkg_download "$OUT/sysmon" sysmonforlinux sysinternalsebpf || die "не вдалося завантажити пакети Sysmon for Linux"
-        write_sums "$OUT/sysmon"
-        echo "    sysmon: $(find "$OUT/sysmon" -name '*.deb' -o -name '*.rpm' | wc -l) пакет(и)"
     fi
     printf 'OS_ID=%s\nOS_VERSION_ID=%s\nARCH=%s\nFAMILY=%s\nCREATED=%s\n' \
         "$HOST_ID" "$HOST_VER" "$HOST_ARCH" "$FAMILY" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$OUT/bundle.info"
@@ -202,20 +201,33 @@ install_offline_pkgs() { # install_offline_pkgs DIR - ставить лише в
             done
             return 1 ;;
         rpm)
+            # відсутні пакети встановлюються, старіші - оновлюються, новіші на хості не чіпаються (без відкату)
+            local upd=()
             for f in "$dir"/*.rpm; do
                 [ -f "$f" ] || continue
                 pkg=$(rpm -qp --qf '%{NAME}' "$f" 2>/dev/null)
-                rpm -q "$pkg" >/dev/null 2>&1 && continue
-                list+=("$f")
+                if rpm -q "$pkg" >/dev/null 2>&1; then
+                    # "rpm -U --test --nodeps" без помилки = файл новіший за встановлений (залежності - з комплекту)
+                    rpm -U --test --nodeps "$f" >/dev/null 2>&1 && upd+=("$f")
+                else
+                    list+=("$f")
+                fi
             done
+            list+=(${upd[@]+"${upd[@]}"})
             [ ${#list[@]} -eq 0 ] && return 0
+            # одна транзакція: rpm сам впорядковує залежності
             rpm -Uvh "${list[@]}" >> /tmp/seclogging-offline.log 2>&1 ;;
         *) return 1 ;;
     esac
 }
 
 do_install() {
-    local main args=("${PASS[@]}")
+    local main args=(${PASS[@]+"${PASS[@]}"}) check=0 a
+    for a in ${PASS[@]+"${PASS[@]}"}; do [ "$a" = "--check" ] && check=1; [ "$a" = "--configure-wazuh" ] && WAZUH=0; done
+    [ "$WAZUH" -eq 1 ] && args+=(--configure-wazuh)
+    local stamp snapdir before after changes
+    stamp=$(date +%Y%m%d-%H%M%S); snapdir=/var/log/seclogging/changes
+    before="$snapdir/$stamp-before.tsv"; after="$snapdir/$stamp-after.tsv"; changes="$snapdir/$stamp-changes.txt"
     if [ -n "$FROM" ]; then
         FROM=$(cd "$FROM" 2>/dev/null && pwd) || die "теку комплекту не знайдено"
         info "Перевірка комплекту $FROM"
@@ -229,31 +241,41 @@ do_install() {
         if [ "$b_id/$b_ver/$b_arch" != "$HOST_ID/$HOST_VER/$HOST_ARCH" ]; then
             echo "    УВАГА: комплект зібрано для $b_id $b_ver $b_arch, а цей хост $HOST_ID $HOST_VER $HOST_ARCH - пакети можуть не встановитися"
         fi
+        main="$FROM/set-security-logging.sh"
+        info "Знімок стану \"до\""
+        bash "$main" --snapshot "$before" >/dev/null || echo "    не вдалося"
         if ! have auditctl && [ -d "$FROM/auditd" ]; then
             info "Офлайн-встановлення auditd з комплекту"
             if install_offline_pkgs "$FROM/auditd"; then echo "    встановлено"
             else echo "    не вдалося (див. /tmp/seclogging-offline.log); set-security-logging.sh спробує через менеджер пакетів"; fi
         fi
-        main="$FROM/set-security-logging.sh"
-        if [ "$WITH_SYSMON" -eq 1 ]; then
-            if ! have sysmon && [ -d "$FROM/sysmon" ]; then
-                info "Офлайн-встановлення Sysmon for Linux з комплекту"
-                if install_offline_pkgs "$FROM/sysmon"; then echo "    встановлено"
-                else echo "    не вдалося (див. /tmp/seclogging-offline.log)"; fi
-            elif [ ! -d "$FROM/sysmon" ]; then
-                echo "    у комплекті немає Sysmon - буде спроба онлайн"
-            fi
-            args+=(--with-sysmon)
-        fi
     else
         main=$(get_main_script) || die "не вдалося отримати set-security-logging.sh (перевірте інтернет або використайте --from)"
-        [ "$WITH_SYSMON" -eq 1 ] && args+=(--with-sysmon)
+        info "Знімок стану \"до\""
+        bash "$main" --snapshot "$before" >/dev/null || echo "    не вдалося"
     fi
-    info "Запуск $main ${args[*]}"
-    bash "$main" "${args[@]}"
+    info "Запуск $main ${args[*]:-}"
+    local rc=0
+    bash "$main" ${args[@]+"${args[@]}"} || rc=$?
+    if [ "$check" -eq 0 ] && [ -f "$before" ]; then
+        info "Знімок стану \"після\" і порівняння"
+        if bash "$main" --snapshot "$after" >/dev/null; then
+            bash "$main" --compare "$before" "$after" --compare-out "$changes"
+        fi
+    fi
+    echo
+    if [ "$rc" -eq 0 ]; then
+        if [ "$check" -eq 1 ]; then echo "ГОТОВО: перевірку виконано, нічого не змінено."; else echo "ГОТОВО: журналювання безпеки налаштовано."; fi
+    else
+        echo "ЗАВЕРШЕНО З ПОМИЛКАМИ (код $rc). Надішліть файли звіту адміністратору."
+    fi
+    echo "Звіт:          /var/log/seclogging/last-report.json"
+    [ -f "$changes" ] && echo "Що змінилося:  $changes"
+    [ "$check" -eq 1 ] && [ -f "$before" ] && echo "Стан:          $before"
+    return "$rc"
 }
 
 case "$CMD" in
     build) do_build ;;
-    install) do_install ;;
+    install) do_install; exit $? ;;
 esac

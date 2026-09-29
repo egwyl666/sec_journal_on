@@ -82,6 +82,19 @@
     Разом із -BuildPackage: прийняти Sysmon.zip, хеш якого відрізняється від
     закріпленого (новий реліз Microsoft). Підпис усе одно перевіряється.
 
+.PARAMETER Snapshot
+    Записати знімок поточного стану (аудит, журнали, реєстр, Sysmon, Wazuh, GPO) у файл і вийти.
+    Нічого не змінює. Знімки "до" і "після" порівнюються через -CompareBefore/-CompareAfter.
+
+.PARAMETER CompareBefore
+    Знімок "до" для порівняння (разом з -CompareAfter). Звіт про зміни - у -CompareOut і на екран.
+
+.PARAMETER CompareAfter
+    Знімок "після" для порівняння.
+
+.PARAMETER CompareOut
+    Файл звіту про зміни (.txt; поруч записується .csv для Excel).
+
 .PARAMETER ExportSettings
     Повернути таблицю налаштувань (використовує New-SecLoggingGpo.ps1).
 
@@ -114,7 +127,11 @@ param(
     [switch]$Quiet,
     [string]$BuildPackage,
     [switch]$AcceptNewSysmon,
-    [switch]$ExportSettings
+    [switch]$ExportSettings,
+    [string]$Snapshot,
+    [string]$CompareBefore,
+    [string]$CompareAfter,
+    [string]$CompareOut
 )
 
 $ErrorActionPreference = 'Stop'
@@ -172,7 +189,7 @@ function Write-Host {
 
 #endregion
 
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.3.0'
 $ScriptPath = $MyInvocation.MyCommand.Path
 $ScriptDir = Split-Path -Parent $ScriptPath
 $StateRegPath = 'SOFTWARE\SecLogging'
@@ -246,10 +263,14 @@ function Get-SecLoggingSettings {
         @{ N = 'Microsoft-Windows-Security-Mitigations/KernelMode'; C = 'Other' }
         @{ N = 'Microsoft-Windows-Security-Mitigations/UserMode'; C = 'Other' }
         @{ N = 'Microsoft-Windows-LSA/Operational'; C = 'Other' }
+        @{ N = 'Microsoft-Windows-Shell-Core/Operational'; C = 'Other' }
+        @{ N = 'Microsoft-Windows-GroupPolicy/Operational'; C = 'Other' }
+        @{ N = 'Microsoft-Windows-LAPS/Operational'; C = 'Other' }
         @{ N = 'Directory Service'; C = 'DirSvc'; DC = $true }
         @{ N = 'DNS Server'; C = 'Other'; DC = $true }
         @{ N = 'Microsoft-Windows-DNSServer/Audit'; C = 'Other'; DC = $true }
         @{ N = 'DFS Replication'; C = 'Other'; DC = $true }
+        @{ N = 'Active Directory Web Services'; C = 'Other'; DC = $true }
     )
 
     # Advanced Audit Policy за GUID підкатегорії (не залежить від мови ОС).
@@ -286,6 +307,7 @@ function Get-SecLoggingSettings {
         'Detailed File Share|9244|2|2|2'
         'Removable Storage|9245|3|3|3'
         'Other Object Access Events|9227|3|3|3'
+        'Certification Services|9221|0|3|3'
         # --- Policy Change
         'Audit Policy Change|922F|3|3|3'
         'Authentication Policy Change|9230|1|1|1'
@@ -319,6 +341,7 @@ function Get-SecLoggingSettings {
         @{ Path = "$core\ModuleLogging\ModuleNames"; Name = '*'; Type = 'String'; Value = '*'; Mode = 'Exact'; DC = $false; Why = 'Module logging для PowerShell 7' }
         @{ Path = 'SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0'; Name = 'AuditReceivingNTLMTraffic'; Type = 'DWord'; Value = 2; Mode = 'Min'; DC = $false; Why = 'Аудит вхідного NTLM (8001-8003)' }
         @{ Path = 'SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0'; Name = 'RestrictSendingNTLMTraffic'; Type = 'DWord'; Value = 1; Mode = 'Min'; DC = $false; Why = 'Аудит вихідного NTLM (8001)' }
+        @{ Path = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\LSASS.exe'; Name = 'AuditLevel'; Type = 'DWord'; Value = 8; Mode = 'Min'; DC = $false; Why = 'Аудит завантаження непідписаних модулів у LSASS (CodeIntegrity 3065/3066), нічого не блокує' }
         @{ Path = 'SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'; Name = 'AuditNTLMInDomain'; Type = 'DWord'; Value = 7; Mode = 'Min'; DC = $true; Why = 'Аудит NTLM у домені (8004)' }
         @{ Path = 'SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics'; Name = '16 LDAP Interface Events'; Type = 'DWord'; Value = 2; Mode = 'Min'; DC = $true; Why = 'LDAP без підпису / simple bind (2889)' }
     )
@@ -791,6 +814,11 @@ function Invoke-RegistrySettings {
     param($Settings, [string]$RoleName)
     $items = @()
     foreach ($r in $Settings.Registry) { if (-not $r.DC -or $RoleName -eq 'DomainController') { $items += $r } }
+    # Центр сертифікації (AD CS): без AuditFilter CA не пише подій 4886-4899 навіть за увімкненого аудиту
+    $ca = Get-RegValue 'SYSTEM\CurrentControlSet\Services\CertSvc\Configuration' 'Active'
+    if ($ca) {
+        $items += @{ Path = "SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$ca"; Name = 'AuditFilter'; Type = 'DWord'; Value = 127; Mode = 'Min'; Why = 'Аудит CA (4886-4899); діє після перезапуску служби certsvc' }
+    }
     if ($TranscriptionPath) {
         $t = 'SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription'
         $items += @{ Path = $t; Name = 'EnableTranscripting'; Type = 'DWord'; Value = 1; Mode = 'Min'; Why = 'PowerShell Transcription' }
@@ -831,6 +859,31 @@ function Initialize-TranscriptionFolder {
 
 #endregion
 #region ---------------------------------------------------------------- PowerShell v2
+
+function Get-TimeSyncState {
+    # Налаштування служби часу: Type (NT5DS - від домену, NTP - від сервера, NoSync - вимкнено), сервери, режим запуску
+    $st = @{ Type = [string](Get-RegValue 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters' 'Type'); NtpServer = [string](Get-RegValue 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters' 'NtpServer'); StartMode = ''; State = '' }
+    $svc = Get-WmiObject Win32_Service -Filter "Name='W32Time'"
+    if ($svc) { $st.StartMode = [string]$svc.StartMode; $st.State = [string]$svc.State }
+    $st
+}
+
+function Test-TimeSync {
+    # -> @{ Status; Message } за станом служби часу (лише перевірка, нічого не змінює)
+    param($State)
+    if (-not $State.StartMode) { return @{ Status = 'Warning'; Message = 'Служби часу W32Time немає' } }
+    if ($State.StartMode -eq 'Disabled') { return @{ Status = 'Warning'; Message = 'Службу часу W32Time вимкнено: час подій на різних машинах розійдеться' } }
+    switch ($State.Type) {
+        'NoSync' { return @{ Status = 'Warning'; Message = 'Синхронізацію часу вимкнено (Type=NoSync)' } }
+        'NT5DS' { return @{ Status = 'OK'; Message = ('час від домену (NT5DS), служба {0}/{1}' -f $State.StartMode, $State.State) } }
+        default { return @{ Status = 'OK'; Message = ('{0}: {1}, служба {2}/{3}' -f $State.Type, $State.NtpServer, $State.StartMode, $State.State) } }
+    }
+}
+
+function Invoke-TimeSyncCheck {
+    $r = Test-TimeSync (Get-TimeSyncState)
+    Add-Result 'Time' 'Синхронізація часу' $r.Status $r.Message
+}
 
 function Invoke-PowerShellV2Check {
     param($HostInfo)
@@ -1012,6 +1065,163 @@ function Invoke-Sysmon {
         Add-Result 'Sysmon' 'Конфіг' 'Changed' ('застосовано {0}' -f $cfg.Sha256) $state.AppliedConfigSha256 $cfg.Sha256
     }
     else { Add-Result 'Sysmon' 'Конфіг' 'Error' ("sysmon -c код {0}: {1}" -f $r.Code, $r.Output) }
+}
+
+#endregion
+#region ---------------------------------------------------------------- знімки стану "до / після"
+
+function Get-AuditSubcategoryNames {
+    # Усі підкатегорії Advanced Audit Policy (суфікс GUID 0CCExxxx-69AE-11D9-BED3-505054503030 | англійська назва)
+    @('9210|Security State Change', '9211|Security System Extension', '9212|System Integrity', '9213|IPsec Driver', '9214|Other System Events',
+        '9215|Logon', '9216|Logoff', '9217|Account Lockout', '9218|IPsec Main Mode', '9219|IPsec Quick Mode', '921A|IPsec Extended Mode',
+        '921B|Special Logon', '921C|Other Logon/Logoff Events', '921D|File System', '921E|Registry', '921F|Kernel Object', '9220|SAM',
+        '9221|Certification Services', '9222|Application Generated', '9223|Handle Manipulation', '9224|File Share',
+        '9225|Filtering Platform Packet Drop', '9226|Filtering Platform Connection', '9227|Other Object Access Events',
+        '9228|Sensitive Privilege Use', '9229|Non Sensitive Privilege Use', '922A|Other Privilege Use Events', '922B|Process Creation',
+        '922C|Process Termination', '922D|DPAPI Activity', '922E|RPC Events', '922F|Audit Policy Change', '9230|Authentication Policy Change',
+        '9231|Authorization Policy Change', '9232|MPSSVC Rule-Level Policy Change', '9233|Filtering Platform Policy Change',
+        '9234|Other Policy Change Events', '9235|User Account Management', '9236|Computer Account Management', '9237|Security Group Management',
+        '9238|Distribution Group Management', '9239|Application Group Management', '923A|Other Account Management Events',
+        '923B|Directory Service Access', '923C|Directory Service Changes', '923D|Directory Service Replication',
+        '923E|Detailed Directory Service Replication', '923F|Credential Validation', '9240|Kerberos Service Ticket Operations',
+        '9241|Other Account Logon Events', '9242|Kerberos Authentication Service', '9243|Network Policy Server', '9244|Detailed File Share',
+        '9245|Removable Storage', '9246|Central Policy Staging', '9247|User / Device Claims', '9248|Plug and Play Events',
+        '9249|Group Membership', '924A|Token Right Adjusted Events')
+}
+
+function Get-StateSnapshot {
+    # Рядки "Область<TAB>Елемент<TAB>Значення" - усе, що скрипт перевіряє або змінює.
+    param($Settings)
+    $lines = @()
+    $names = @{}
+    foreach ($pair in (Get-AuditSubcategoryNames)) { $kv = $pair.Split('|'); $names[('0CCE{0}-69AE-11D9-BED3-505054503030' -f $kv[0])] = $kv[1] }
+    foreach ($a in $Settings.AuditPolicy) { $names[$a.Guid.ToUpper()] = $a.Name }
+    try {
+        $map = Get-AuditPolicyMap
+        foreach ($g in $map.Keys) {
+            $n = $names[$g]; if (-not $n) { $n = "{$g}" }
+            $lines += "AuditPolicy`t$n`t$(Format-AuditValue $map[$g])"
+        }
+    }
+    catch { $lines += "AuditPolicy`t(помилка)`t$($_.Exception.Message)" }
+    foreach ($c in $Settings.Channels) {
+        $st = Get-ChannelState $c.N
+        if ($st.Exists) { $v = 'увімкнено={0}; розмір={1} МБ; режим={2}' -f $st.Enabled, [math]::Round([double]$st.MaxBytes / 1MB), $st.Mode }
+        else { $v = 'немає в цій ОС' }
+        $lines += "EventLog`t$($c.N)`t$v"
+    }
+    $reg = @($Settings.Registry)
+    $t = 'SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription'
+    $reg += @{ Path = $t; Name = 'EnableTranscripting' }, @{ Path = $t; Name = 'OutputDirectory' }
+    $ca = Get-RegValue 'SYSTEM\CurrentControlSet\Services\CertSvc\Configuration' 'Active'
+    if ($ca) { $reg += @{ Path = "SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$ca"; Name = 'AuditFilter' } }
+    foreach ($r in $reg) {
+        $v = Get-RegValue $r.Path $r.Name; if ($null -eq $v) { $v = '(не задано)' }
+        $lines += "Registry`t$($r.Path)\$($r.Name)`t$v"
+    }
+    $ts = Get-TimeSyncState
+    $lines += "Time`tW32Time`tType=$($ts.Type); NtpServer=$($ts.NtpServer); запуск=$($ts.StartMode)"
+    $sm = Get-SysmonState
+    if ($sm.Installed) {
+        $lines += "Sysmon`tСлужба`t$($sm.ServiceName) ($($sm.State))"
+        $lines += "Sysmon`tВерсія`t$($sm.Version)"
+    }
+    else { $lines += "Sysmon`tСлужба`tне встановлено" }
+    $cfg = $sm.AppliedConfigSha256; if (-not $cfg) { $cfg = '(невідомо)' }
+    $lines += "Sysmon`tКонфіг (SHA256)`t$cfg"
+    $svc = $null
+    foreach ($n in @('WazuhSvc', 'OssecSvc')) { $svc = Get-WmiObject Win32_Service -Filter "Name='$n'"; if ($svc) { break } }
+    if ($svc -and [string]$svc.PathName -match '^"?([^"]+?\.exe)') {
+        $dir = Split-Path -Parent $Matches[1]
+        $lines += "Wazuh`tАгент`t$($svc.State)"
+        foreach ($l in @(Get-WazuhLocations @((Join-Path $dir 'ossec.conf'), (Join-Path $dir 'shared\agent.conf')) | Sort-Object -Unique)) { $lines += "Wazuh`t$l`tзбирається" }
+    }
+    else { $lines += "Wazuh`tАгент`tне встановлено" }
+    # GPO (лише там, де є модуль GroupPolicy - зазвичай DC)
+    if (Get-Module -ListAvailable -Name GroupPolicy -ErrorAction SilentlyContinue) {
+        try {
+            Import-Module GroupPolicy -ErrorAction Stop
+            foreach ($g in @('SEC-Logging-Baseline', 'SEC-Logging-DomainControllers')) {
+                $o = Get-GPO -Name $g -ErrorAction SilentlyContinue
+                if ($o) { $lines += "GPO`t$g`tверсія комп'ютера $($o.Computer.DSVersion), змінено $($o.ModificationTime.ToString('yyyy-MM-dd HH:mm'))" }
+                else { $lines += "GPO`t$g`tнемає" }
+            }
+        }
+        catch { $lines += "GPO`t(помилка)`t$($_.Exception.Message)" }
+    }
+    $lines | Sort-Object
+}
+
+function Save-StateSnapshot {
+    param([string]$Path, [string[]]$Lines, $HostInfo)
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $head = @(('# SecLogging знімок стану; {0}; {1} {2}; {3:yyyy-MM-dd HH:mm:ss}; скрипт {4}' -f $env:COMPUTERNAME, $HostInfo.OSCaption, $HostInfo.OSVersion, (Get-Date), $ScriptVersion),
+        "# Область`tЕлемент`tЗначення")
+    [System.IO.File]::WriteAllLines($Path, [string[]]($head + $Lines), (New-Object System.Text.UTF8Encoding($true)))
+}
+
+function Read-StateSnapshot {
+    # -> @{ 'Область<TAB>Елемент' = Значення }
+    param([string[]]$Lines)
+    $h = @{}
+    foreach ($l in $Lines) {
+        if (-not $l -or $l.StartsWith('#')) { continue }
+        $p = $l.Split("`t")
+        if ($p.Count -lt 3) { continue }
+        $h["$($p[0])`t$($p[1])"] = ($p[2..($p.Count - 1)] -join "`t")
+    }
+    $h
+}
+
+function Compare-StateSnapshot {
+    # -> масив @{ Area; Item; Before; After }, відсортований за областю й елементом
+    param([string[]]$Before, [string[]]$After)
+    $b = Read-StateSnapshot $Before; $a = Read-StateSnapshot $After
+    $keys = @($b.Keys) + @($a.Keys) | Sort-Object -Unique
+    $out = @()
+    foreach ($k in $keys) {
+        $vb = $b[$k]; $va = $a[$k]
+        if ($vb -eq $va) { continue }
+        if ($null -eq $vb) { $vb = '(не було)' }
+        if ($null -eq $va) { $va = '(зникло)' }
+        $p = $k.Split("`t")
+        $out += @{ Area = $p[0]; Item = $p[1]; Before = $vb; After = $va }
+    }
+    $out
+}
+
+function Write-StateComparison {
+    # Текстовий звіт (і CSV поруч) про зміни між двома знімками; повертає кількість змін
+    param([string]$BeforePath, [string]$AfterPath, [string]$OutPath)
+    $enc = New-Object System.Text.UTF8Encoding($true)
+    $before = [System.IO.File]::ReadAllLines($BeforePath); $after = [System.IO.File]::ReadAllLines($AfterPath)
+    $changes = @(Compare-StateSnapshot $before $after)
+    $text = @(
+        'SecLogging: що змінилося',
+        ('До:    {0}' -f ($before | Select-Object -First 1)),
+        ('Після: {0}' -f ($after | Select-Object -First 1)),
+        ('Змін: {0}' -f $changes.Count),
+        ''
+    )
+    $area = ''
+    foreach ($c in $changes) {
+        if ($c.Area -ne $area) { $area = $c.Area; $text += ''; $text += "[$area]" }
+        $text += ('  {0}' -f $c.Item)
+        $text += ('      було:  {0}' -f $c.Before)
+        $text += ('      стало: {0}' -f $c.After)
+    }
+    if (-not $changes.Count) { $text += 'Змін немає.' }
+    if ($OutPath) {
+        $dir = Split-Path -Parent $OutPath
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        [System.IO.File]::WriteAllLines($OutPath, [string[]]$text, $enc)
+        $csv = @('Область;Елемент;Було;Стало')
+        foreach ($c in $changes) { $csv += (@($c.Area, $c.Item, $c.Before, $c.After) | ForEach-Object { '"' + ([string]$_ -replace '"', '""') + '"' }) -join ';' }
+        [System.IO.File]::WriteAllLines([System.IO.Path]::ChangeExtension($OutPath, '.csv'), [string[]]$csv, $enc)
+    }
+    foreach ($l in $text) { Write-Host $l }
+    $changes.Count
 }
 
 #endregion
@@ -1207,7 +1417,18 @@ if ($BuildPackage) {
     catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 2 }
 }
 
+if ($CompareBefore -or $CompareAfter) {
+    if (-not ($CompareBefore -and $CompareAfter)) { Write-Host 'Потрібні обидва: -CompareBefore і -CompareAfter.' -ForegroundColor Red; exit 64 }
+    try { $null = Write-StateComparison $CompareBefore $CompareAfter $CompareOut; exit 0 }
+    catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 2 }
+}
+
 if (-not (Test-IsAdmin)) { Write-Error 'Запустіть від імені адміністратора (з підвищеними правами).'; exit 3 }
+
+if ($Snapshot) {
+    try { Save-StateSnapshot $Snapshot (Get-StateSnapshot (Get-SecLoggingSettings)) (Get-HostInfo); Write-Host "Знімок стану: $Snapshot"; exit 0 }
+    catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 2 }
+}
 
 $mutex = New-Object System.Threading.Mutex($false, 'Global\SecLoggingRun')
 if (-not $mutex.WaitOne(0)) { Write-Host 'Інший запуск Set-SecurityLogging уже виконується, вихід.'; exit 0 }
@@ -1235,6 +1456,7 @@ try {
             @{ Name = 'Registry'; Block = { Invoke-RegistrySettings $settings $roleName } }
             @{ Name = 'AuditPolicy'; Block = { if ($SkipAuditPolicy) { Add-Result 'AuditPolicy' 'AuditPolicy' 'Skipped' '-SkipAuditPolicy' } else { Invoke-AuditPolicy $settings $roleName } } }
             @{ Name = 'PowerShell'; Block = { Invoke-PowerShellV2Check $hostInfo } }
+            @{ Name = 'Time'; Block = { Invoke-TimeSyncCheck } }
             @{ Name = 'EventLog'; Block = { Invoke-Channels $settings $roleName $hostInfo } }
             @{ Name = 'Wazuh'; Block = { Invoke-Wazuh $settings $roleName } }
         )) {
@@ -1248,19 +1470,21 @@ try {
     }
 
     $summary = 'OK={0} Changed={1} WouldChange={2} Warning={3} Error={4} Skipped={5}' -f $Script:Counts.OK, $Script:Counts.Changed, $Script:Counts.WouldChange, $Script:Counts.Warning, $Script:Counts.Error, $Script:Counts.Skipped
-    $report = New-OD
-    $report.Tool = 'Set-SecurityLogging'
-    $report.Version = $ScriptVersion
-    $report.Mode = $(if ($AuditOnly) { 'AuditOnly' } else { 'Apply' })
-    $report.Started = $started
-    $report.Finished = Get-Date
-    $report.Host = $hostInfo
-    $report.Role = $roleName
-    $report.Source = $(if ($SourcePath) { $SourcePath } else { 'online' })
-    $report.Summary = $Script:Counts
-    $report.Results = $Script:Report
+    # Не $report: у PowerShell імена змінних без урахування регістру, і на рівні скрипта
+    # $report - це той самий $Script:Report (список результатів). Звідси колись звіт "сам у собі".
+    $reportDoc = New-OD
+    $reportDoc.Tool = 'Set-SecurityLogging'
+    $reportDoc.Version = $ScriptVersion
+    $reportDoc.Mode = $(if ($AuditOnly) { 'AuditOnly' } else { 'Apply' })
+    $reportDoc.Started = $started
+    $reportDoc.Finished = Get-Date
+    $reportDoc.Host = $hostInfo
+    $reportDoc.Role = $roleName
+    $reportDoc.Source = $(if ($SourcePath) { $SourcePath } else { 'online' })
+    $reportDoc.Summary = $Script:Counts
+    $reportDoc.Results = $Script:Report
     if (-not $ReportPath) { $ReportPath = Join-Path $WorkDir ('report-{0:yyyyMMdd-HHmmss}.json' -f $started) }
-    try { $json = ConvertTo-JsonString $report }
+    try { $json = ConvertTo-JsonString $reportDoc }
     catch {
         Write-Host "Не вдалося сформувати JSON-звіт: $($_.Exception.Message)" -ForegroundColor Yellow
         $json = '{ "Tool": "Set-SecurityLogging", "Error": ' + (Format-JsonText ([string]$_.Exception.Message)) + ', "Summary": ' + (Format-JsonText $summary) + ' }'
