@@ -60,6 +60,60 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+#region ---------------------------------------------------------------- вивід у консоль
+# PowerShell 2.0 в англійській Windows виводить кирилицю як "????" (кодова сторінка консолі 437).
+# Тоді текст для консолі транслітерується латиницею; JSON-звіт і журнал подій лишаються українською.
+
+$Script:NeedTranslit = $false
+if ($PSVersionTable.PSVersion.Major -lt 3) {
+    try {
+        $probe = [string][char]0x0456 + [char]0x0457 + [char]0x0454 + [char]0x0436
+        $enc = [Console]::OutputEncoding
+        $Script:NeedTranslit = ($enc.GetString($enc.GetBytes($probe)) -ne $probe)
+    }
+    catch { $Script:NeedTranslit = $false }
+}
+
+function Get-TranslitMap {
+    if ($Script:TranslitMap) { return $Script:TranslitMap }
+    $map = New-Object System.Collections.Hashtable ([System.StringComparer]::Ordinal)
+    foreach ($pair in ('А=A Б=B В=V Г=H Ґ=G Д=D Е=E Є=Ye Ж=Zh З=Z И=Y І=I Ї=Yi Й=Y К=K Л=L М=M Н=N О=O П=P Р=R С=S Т=T У=U Ф=F Х=Kh Ц=Ts Ч=Ch Ш=Sh Щ=Shch Ь= Ю=Yu Я=Ya Ё=Yo Ы=Y Э=E Ъ=' -split ' ')) {
+        $kv = $pair.Split('=')
+        $map[$kv[0]] = $kv[1]
+        $map[$kv[0].ToLower()] = $kv[1].ToLower()
+    }
+    $map[[string][char]0x02BC] = "'"
+    $Script:TranslitMap = $map
+    $map
+}
+
+function ConvertTo-ConsoleText {
+    param([string]$Text, [switch]$Force)
+    if ((-not $Script:NeedTranslit -and -not $Force) -or -not $Text) { return $Text }
+    $map = Get-TranslitMap
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $Text.ToCharArray()) {
+        $k = [string]$ch
+        if ($map.ContainsKey($k)) { [void]$sb.Append($map[$k]) } else { [void]$sb.Append($ch) }
+    }
+    $sb.ToString()
+}
+
+function Write-Host {
+    # Заміна Write-Host у межах скрипта: транслітерація за потреби; вивід через $Host.UI (без рекурсії)
+    param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [ConsoleColor]$ForegroundColor, [switch]$NoNewline)
+    $text = ConvertTo-ConsoleText ((@($Object) | ForEach-Object { [string]$_ }) -join ' ')
+    if ($PSBoundParameters.ContainsKey('ForegroundColor')) {
+        if ($NoNewline) { $Host.UI.Write($ForegroundColor, $Host.UI.RawUI.BackgroundColor, $text) }
+        else { $Host.UI.WriteLine($ForegroundColor, $Host.UI.RawUI.BackgroundColor, $text) }
+    }
+    elseif ($NoNewline) { $Host.UI.Write($text) }
+    else { $Host.UI.WriteLine($text) }
+}
+
+#endregion
+
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = $null
 $WorkRoot = $null
@@ -136,24 +190,63 @@ function Save-Results {
     $svc = Get-SysmonService
     if ($svc) {
         $exe = ([string]$svc.PathName).Trim('"')
-        $out = & $exe -c 2>&1 | ForEach-Object { [string]$_ }
+        $out = Invoke-Quiet $exe @('-c')
         $out | Set-Content -LiteralPath (Join-Path $dir 'sysmon-config.txt') -Encoding UTF8
     }
     Get-HotFix | Sort-Object HotFixID | ForEach-Object { '{0}  {1}' -f $_.HotFixID, $_.InstalledOn } | Set-Content -LiteralPath (Join-Path $dir 'hotfixes.txt') -Encoding UTF8
     $dir
 }
 
+function Invoke-Quiet {
+    # Запуск зовнішньої програми: stderr не стає винятком (ErrorActionPreference=Stop), вивід - рядками
+    param([string]$FilePath, [string[]]$Arguments)
+    $ErrorActionPreference = 'Continue'
+    @(& $FilePath @Arguments 2>&1 | ForEach-Object { [string]$_ })
+}
+
+function Get-DriverState {
+    # Стан драйвера через sc.exe (WMI Win32_SystemDriver на 2008 R2 його не завжди показує).
+    # Назви полів sc локалізовані, назви станів - ні.
+    param([string]$Name)
+    $out = Invoke-Quiet 'sc.exe' @('query', $Name)
+    $m = [regex]::Match(($out -join "`n"), '\d\s+(STOPPED|START_PENDING|STOP_PENDING|RUNNING|CONTINUE_PENDING|PAUSE_PENDING|PAUSED)\b')
+    if ($m.Success) { return $m.Groups[1].Value }
+    if (Test-Path -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$Name") { return 'зареєстровано, стан невідомий' }
+    'не знайдено'
+}
+
+function ConvertFrom-EventXml {
+    # Розбирає вивід "wevtutil qe ... /f:xml" без .NET 3.5 -> @{ Id; Time; Provider }
+    param([string[]]$Lines)
+    $events = @()
+    foreach ($chunk in (($Lines -join "`n") -split '</Event>')) {
+        $m = [regex]::Match($chunk, '<EventID[^>]*>(\d+)</EventID>')
+        if (-not $m.Success) { continue }
+        $t = [regex]::Match($chunk, "SystemTime=['""]([^'""]+)['""]").Groups[1].Value
+        $pv = [regex]::Match($chunk, "Provider Name=['""]([^'""]+)['""]").Groups[1].Value
+        $events += @{ Id = [int]$m.Groups[1].Value; Time = $t; Provider = $pv }
+    }
+    $events
+}
+
+function Get-LogEvents {
+    # Події журналу з моменту $Since через wevtutil (Get-WinEvent потребує .NET 3.5, якого на 2008 R2 може не бути)
+    param([string]$LogName, [datetime]$Since, [int[]]$Ids)
+    $ms = [long]((Get-Date) - $Since).TotalMilliseconds
+    if ($ms -lt 1000) { $ms = 1000 }
+    $cond = "TimeCreated[timediff(@SystemTime) <= $ms]"
+    if ($Ids) { $cond = '(' + (($Ids | ForEach-Object { "EventID=$_" }) -join ' or ') + ') and ' + $cond }
+    $out = Invoke-Quiet 'wevtutil.exe' @('qe', $LogName, "/q:*[System[$cond]]", '/c:20000', '/f:xml')
+    @(ConvertFrom-EventXml $out)
+}
+
 function Get-CrashEvents {
+    # BSOD (1001 від WER-SystemErrorReporting), неочікуване перезавантаження (41 Kernel-Power, 6008)
     param([datetime]$Since)
     $found = @()
-    $filters = @(
-        @{ LogName = 'System'; Id = 1001; ProviderName = 'Microsoft-Windows-WER-SystemErrorReporting' }
-        @{ LogName = 'System'; Id = 41; ProviderName = 'Microsoft-Windows-Kernel-Power' }
-        @{ LogName = 'System'; Id = 6008 }
-    )
-    foreach ($f in $filters) {
-        $f.StartTime = $Since
-        try { $found += @(Get-WinEvent -FilterHashtable $f -ErrorAction Stop) } catch { Write-Verbose 'подій не знайдено' }
+    foreach ($e in (Get-LogEvents 'System' $Since @(41, 1001, 6008))) {
+        if ($e.Id -eq 1001 -and $e.Provider -notlike '*SystemErrorReporting*') { continue }
+        $found += $e
     }
     $found
 }
@@ -184,7 +277,7 @@ if ($CollectOnly) {
     $summary += "Sysmon: $(if ($svc) { '{0} {1}' -f $svc.Name, $svc.State } else { 'не встановлено' })"
     $summary += "Встановлена версія (за записом стенду): $(Get-RegValue 'Version')"
     $summary += "Аварійних подій з $($since.ToString('s')): $($crashes.Count)"
-    foreach ($c in $crashes) { $summary += ('  {0} id={1} {2}' -f $c.TimeCreated.ToString('s'), $c.Id, (([string]$c.Message) -split "`n")[0]) }
+    foreach ($c in $crashes) { $summary += ('  {0} EventID={1} {2}' -f $c.Time, $c.Id, $c.Provider) }
     $dir = Save-Results ('collect-sysmon' + (Get-RegValue 'Version')) $summary
     $summary | ForEach-Object { Write-Host "    $_" }
     Write-Host "Результати: $dir" -ForegroundColor Green
@@ -255,13 +348,12 @@ if ($svc -and $svc.State -eq 'Running') {
         Set-Content -LiteralPath (Join-Path $env:TEMP 'seclab-test.txt') -Value (Get-Date)
         Start-Sleep -Seconds 5
     }
-    $events = @()
-    try { $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Sysmon/Operational'; StartTime = $started } -ErrorAction Stop) }
-    catch { Write-Host "    подій не прочитано: $($_.Exception.Message)" -ForegroundColor Yellow }
+    $events = @(Get-LogEvents 'Microsoft-Windows-Sysmon/Operational' $started)
     $summary += "Подій Sysmon з моменту встановлення: $($events.Count)"
-    foreach ($g in ($events | Group-Object Id | Sort-Object { [int]$_.Name })) { $summary += ('  EventID {0}: {1}' -f $g.Name, $g.Count) }
-    $drv = Get-WmiObject Win32_SystemDriver -Filter "Name='SysmonDrv'"
-    $summary += "Драйвер SysmonDrv: $(if ($drv) { $drv.State } else { 'не знайдено' })"
+    $byId = @{}
+    foreach ($e in $events) { $byId[$e.Id] = 1 + [int]$byId[$e.Id] }
+    foreach ($id in ($byId.Keys | Sort-Object)) { $summary += ('  EventID {0}: {1}' -f $id, $byId[$id]) }
+    $summary += "Драйвер SysmonDrv: $(Get-DriverState 'SysmonDrv')"
 }
 else {
     $summary += 'Служба Sysmon не працює - дивіться last-report.json і журнал System'

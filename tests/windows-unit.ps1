@@ -140,7 +140,12 @@ Assert ($sec.Value -eq 3072 * 1024) 'MaxSize журналу Security для DC �
 Write-Host 'Логіка політики аудиту (auditpol підмінено)'
 $global:Quiet = $true; $global:AuditOnly = $false; $global:SysRoot = [IO.Path]::GetTempPath()
 $env:SystemRoot = Join-Path $global:SysRoot ('sr-' + [guid]::NewGuid())
-$global:AuditState = @{ '0CCE9215-69AE-11D9-BED3-505054503030' = 1; '0CCE9224-69AE-11D9-BED3-505054503030' = 3 }
+# як справжній auditpol /backup: усі підкатегорії ОС (0), але без Group Membership - як на Server 2008 R2
+$global:AuditState = @{}
+foreach ($a in $s.AuditPolicy) { $global:AuditState[$a.Guid.ToUpper()] = 0 }
+$global:AuditState['0CCE9215-69AE-11D9-BED3-505054503030'] = 1
+$global:AuditState['0CCE9224-69AE-11D9-BED3-505054503030'] = 3
+$global:AuditState.Remove('0CCE9249-69AE-11D9-BED3-505054503030')
 $global:Calls = @()
 function global:Get-AuditPolicyMap { $h = @{}; foreach ($k in $global:AuditState.Keys) { $h[$k] = $global:AuditState[$k] }; $h }
 function global:Invoke-Native {
@@ -169,7 +174,8 @@ Invoke-AuditPolicy $s2 'Workstation'
 $logon = $global:AuditState['0CCE9215-69AE-11D9-BED3-505054503030']
 Assert ($logon -eq 3) 'Logon піднято: Успіх -> Успіх і відмова'
 Assert ($global:AuditState['0CCE9224-69AE-11D9-BED3-505054503030'] -eq 3) 'File Share, вже SF, не змінено'
-Assert (-not $global:AuditState.ContainsKey('0CCE923B-69AE-11D9-BED3-505054503030')) 'DS Access не встановлено на робочій станції'
+Assert ($global:AuditState['0CCE923B-69AE-11D9-BED3-505054503030'] -eq 0) 'DS Access не встановлено на робочій станції'
+Assert (-not $global:AuditState.ContainsKey('0CCE9249-69AE-11D9-BED3-505054503030') -and @($Script:Report | Where-Object { $_.Item -eq 'Group Membership' -and $_.Status -eq 'Skipped' }).Count -eq 1) 'непідтримувана ОС підкатегорія пропущена, auditpol для неї не викликано'
 Assert ($Script:Counts.Error -eq 0 -and $Script:Counts.Changed -gt 20) "зміни перевірено (змінено: $($Script:Counts.Changed))"
 $setCalls = @($global:Calls | Where-Object { $_[0] -eq 'auditpol.exe' -and $_[1] -eq '/set' })
 Assert (@($setCalls | Where-Object { $_[2] -notmatch '^/subcategory:\{0CCE92[0-9A-F]{2}-69AE-11D9-BED3-505054503030\}$' }).Count -eq 0) 'auditpol викликається лише з GUID'
@@ -267,6 +273,31 @@ foreach ($lv in '10.42', '10.2') {
 Assert (Test-Path -LiteralPath (Join-Path $lp 'Set-SecurityLogging.ps1')) 'локальний пакет містить Set-SecurityLogging.ps1'
 Remove-Item -LiteralPath $lp -Recurse -Force
 Assert ((Get-KbNumber 'windows6.1-kb4474419-v3-x64_b5614c6cea5cb4e198717789633dca16308ef79c.msu') -eq 'KB4474419') 'номер KB з імені .msu'
+
+Write-Host 'PowerShell 2.0 / Server 2008 R2: запасні шляхи'
+$al = New-Object System.Collections.ArrayList
+[void]$al.Add('a'); [void]$al.Add($al)
+$j = ConvertTo-JsonString $al
+Assert ($j -match '"a"') 'колекція, що містить сама себе, не призводить до переповнення стеку'
+$deep = @{}; $cur = $deep; for ($i = 0; $i -lt 60; $i++) { $cur.n = @{}; $cur = $cur.n }
+Assert ((ConvertTo-JsonString $deep).Length -gt 0) 'глибока вкладеність обмежується'
+$mix = New-OD; $mix.I16 = [int16]5; $mix.B = [byte]7; $mix.F = [single]1.5; $mix.P = [psobject]'текст'; $mix.D = [datetime]'2026-01-02T03:04:05'; $mix.E = [ConsoleColor]::Red
+$pj = (ConvertTo-JsonString $mix) | ConvertFrom-Json
+Assert ($pj.I16 -eq 5 -and $pj.B -eq 7 -and $pj.F -eq 1.5 -and $pj.P -eq 'текст' -and $pj.E -eq 'Red') 'int16/byte/single/PSObject/enum серіалізуються коректно'
+$chXml = '<?xml version="1.0" encoding="UTF-8"?><channel name="Security" enabled="true" type="Admin" isolation="Custom"><logging><logFileName>%SystemRoot%\System32\Winevt\Logs\Security.evtx</logFileName><retention>false</retention><autoBackup>true</autoBackup><maxSize>20971520</maxSize></logging><publishing><fileMax>1</fileMax></publishing></channel>'
+$cx = ConvertFrom-ChannelXml $chXml
+Assert ($cx.Exists -and $cx.Enabled -and $cx.MaxBytes -eq 20971520 -and $cx.Mode -eq 'AutoBackup') 'розбір wevtutil gl /f:xml (без .NET 3.5)'
+$cx2 = ConvertFrom-ChannelXml '<channel name="X" enabled="false"><logging><retention>false</retention><autoBackup>false</autoBackup><maxSize>1052672</maxSize></logging></channel>'
+Assert ((-not $cx2.Enabled) -and $cx2.Mode -eq 'Circular' -and $cx2.MaxBytes -eq 1052672) 'вимкнений канал, режим Circular'
+Import-ScriptFunctions (Join-Path $root 'windows/lab/Test-LegacySysmon.ps1')
+$evXml = @(
+    "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Microsoft-Windows-Sysmon' Guid='{5770385f}'/><EventID>1</EventID><TimeCreated SystemTime='2026-09-29T10:00:00.000Z'/></System></Event>"
+    "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Microsoft-Windows-WER-SystemErrorReporting'/><EventID Qualifiers='16384'>1001</EventID><TimeCreated SystemTime='2026-09-29T11:00:00.000Z'/></System></Event>"
+)
+$ev = @(ConvertFrom-EventXml $evXml)
+Assert ($ev.Count -eq 2 -and $ev[0].Id -eq 1 -and $ev[1].Id -eq 1001 -and $ev[1].Provider -like '*SystemErrorReporting' -and $ev[1].Time -like '2026-09-29T11*') 'розбір wevtutil qe /f:xml (EventID з Qualifiers, провайдер, час)'
+Assert ((ConvertTo-ConsoleText 'Підсумок: OK, звіт Їжак' -Force) -eq 'Pidsumok: OK, zvit Yizhak') 'транслітерація для консолі без кирилиці'
+Assert ((ConvertTo-ConsoleText 'Підсумок') -eq 'Підсумок') 'без потреби текст не змінюється'
 
 Write-Host ''
 Write-Host "Пройдено: $script:passed  Не пройдено: $script:failed"
