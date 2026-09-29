@@ -189,7 +189,7 @@ function Write-Host {
 
 #endregion
 
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.3.0'
 $ScriptPath = $MyInvocation.MyCommand.Path
 $ScriptDir = Split-Path -Parent $ScriptPath
 $StateRegPath = 'SOFTWARE\SecLogging'
@@ -341,6 +341,7 @@ function Get-SecLoggingSettings {
         @{ Path = "$core\ModuleLogging\ModuleNames"; Name = '*'; Type = 'String'; Value = '*'; Mode = 'Exact'; DC = $false; Why = 'Module logging для PowerShell 7' }
         @{ Path = 'SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0'; Name = 'AuditReceivingNTLMTraffic'; Type = 'DWord'; Value = 2; Mode = 'Min'; DC = $false; Why = 'Аудит вхідного NTLM (8001-8003)' }
         @{ Path = 'SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0'; Name = 'RestrictSendingNTLMTraffic'; Type = 'DWord'; Value = 1; Mode = 'Min'; DC = $false; Why = 'Аудит вихідного NTLM (8001)' }
+        @{ Path = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\LSASS.exe'; Name = 'AuditLevel'; Type = 'DWord'; Value = 8; Mode = 'Min'; DC = $false; Why = 'Аудит завантаження непідписаних модулів у LSASS (CodeIntegrity 3065/3066), нічого не блокує' }
         @{ Path = 'SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'; Name = 'AuditNTLMInDomain'; Type = 'DWord'; Value = 7; Mode = 'Min'; DC = $true; Why = 'Аудит NTLM у домені (8004)' }
         @{ Path = 'SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics'; Name = '16 LDAP Interface Events'; Type = 'DWord'; Value = 2; Mode = 'Min'; DC = $true; Why = 'LDAP без підпису / simple bind (2889)' }
     )
@@ -859,6 +860,31 @@ function Initialize-TranscriptionFolder {
 #endregion
 #region ---------------------------------------------------------------- PowerShell v2
 
+function Get-TimeSyncState {
+    # Налаштування служби часу: Type (NT5DS - від домену, NTP - від сервера, NoSync - вимкнено), сервери, режим запуску
+    $st = @{ Type = [string](Get-RegValue 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters' 'Type'); NtpServer = [string](Get-RegValue 'SYSTEM\CurrentControlSet\Services\W32Time\Parameters' 'NtpServer'); StartMode = ''; State = '' }
+    $svc = Get-WmiObject Win32_Service -Filter "Name='W32Time'"
+    if ($svc) { $st.StartMode = [string]$svc.StartMode; $st.State = [string]$svc.State }
+    $st
+}
+
+function Test-TimeSync {
+    # -> @{ Status; Message } за станом служби часу (лише перевірка, нічого не змінює)
+    param($State)
+    if (-not $State.StartMode) { return @{ Status = 'Warning'; Message = 'Служби часу W32Time немає' } }
+    if ($State.StartMode -eq 'Disabled') { return @{ Status = 'Warning'; Message = 'Службу часу W32Time вимкнено: час подій на різних машинах розійдеться' } }
+    switch ($State.Type) {
+        'NoSync' { return @{ Status = 'Warning'; Message = 'Синхронізацію часу вимкнено (Type=NoSync)' } }
+        'NT5DS' { return @{ Status = 'OK'; Message = ('час від домену (NT5DS), служба {0}/{1}' -f $State.StartMode, $State.State) } }
+        default { return @{ Status = 'OK'; Message = ('{0}: {1}, служба {2}/{3}' -f $State.Type, $State.NtpServer, $State.StartMode, $State.State) } }
+    }
+}
+
+function Invoke-TimeSyncCheck {
+    $r = Test-TimeSync (Get-TimeSyncState)
+    Add-Result 'Time' 'Синхронізація часу' $r.Status $r.Message
+}
+
 function Invoke-PowerShellV2Check {
     param($HostInfo)
     if ($HostInfo.IsLegacyOS) { Add-Result 'PowerShell' 'PowerShell 2.0 engine' 'Skipped' 'Стара ОС: v2 - основний рушій, видалити неможливо'; return }
@@ -1093,6 +1119,8 @@ function Get-StateSnapshot {
         $v = Get-RegValue $r.Path $r.Name; if ($null -eq $v) { $v = '(не задано)' }
         $lines += "Registry`t$($r.Path)\$($r.Name)`t$v"
     }
+    $ts = Get-TimeSyncState
+    $lines += "Time`tW32Time`tType=$($ts.Type); NtpServer=$($ts.NtpServer); запуск=$($ts.StartMode)"
     $sm = Get-SysmonState
     if ($sm.Installed) {
         $lines += "Sysmon`tСлужба`t$($sm.ServiceName) ($($sm.State))"
@@ -1428,6 +1456,7 @@ try {
             @{ Name = 'Registry'; Block = { Invoke-RegistrySettings $settings $roleName } }
             @{ Name = 'AuditPolicy'; Block = { if ($SkipAuditPolicy) { Add-Result 'AuditPolicy' 'AuditPolicy' 'Skipped' '-SkipAuditPolicy' } else { Invoke-AuditPolicy $settings $roleName } } }
             @{ Name = 'PowerShell'; Block = { Invoke-PowerShellV2Check $hostInfo } }
+            @{ Name = 'Time'; Block = { Invoke-TimeSyncCheck } }
             @{ Name = 'EventLog'; Block = { Invoke-Channels $settings $roleName $hostInfo } }
             @{ Name = 'Wazuh'; Block = { Invoke-Wazuh $settings $roleName } }
         )) {

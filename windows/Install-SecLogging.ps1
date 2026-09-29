@@ -31,7 +31,7 @@
     Завантажити скрипти з GitHub, навіть якщо поруч є локальні.
 
 .PARAMETER RepoRef
-    Гілка/тег/коміт для -Fetch. За замовчуванням HEAD (гілка репозиторію за замовчуванням).
+    Гілка/тег/коміт для -Fetch. За замовчуванням закріплений реліз; HEAD - остання версія.
     Для гілки зі скісною рискою: refs/heads/<назва>.
 
 .PARAMETER Rebuild
@@ -68,7 +68,7 @@ param(
     [switch]$Fetch,
     [string]$RepoOwner = 'egwyl666',
     [string]$RepoName = 'sec_journal_on',
-    [string]$RepoRef = 'HEAD',
+    [string]$RepoRef = 'v1.3.0',
     [switch]$Rebuild,
     [switch]$NoBuild,
     [switch]$UpdateRepoPins,

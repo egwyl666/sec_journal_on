@@ -317,13 +317,14 @@ $sbText = [System.IO.File]::ReadAllText($start, [System.Text.Encoding]::UTF8).Tr
 Assert ($null -ne [scriptblock]::Create($sbText)) 'створюється як scriptblock (як в однорядковій команді)'
 Import-ScriptFunctions $start
 $p = Get-StartPlan 1 ([version]'10.0.22631') $false $false $false $false '10.42'
-Assert ($p.Role -eq 'Workstation' -and -not $p.Gpo -and ($p.Local -join ' ') -eq '-Mode Local -ConfigureWazuh') 'Win10/11: лише локально, Sysmon сучасний'
+Assert ($p.Role -eq 'Workstation' -and -not $p.Gpo -and ($p.Local -join ' ') -eq '-Mode Local -DisablePowerShellV2 -ConfigureWazuh') 'Win10/11: лише локально, Sysmon сучасний, PowerShell 2.0 вимикається'
+Assert (-not ((Get-StartPlan 1 ([version]'10.0.22631') $false $false $false $false '10.42' $true).Local -contains '-DisablePowerShellV2')) '-KeepPowerShellV2 залишає PowerShell 2.0'
 $p = Get-StartPlan 3 ([version]'6.1.7601') $false $false $false $false '10.42'
 Assert ($p.Legacy -and ($p.Local -join ' ') -eq '-Mode Local -AllowLegacySysmon -LegacySysmonVersion 10.42 -ConfigureWazuh' -and -not $p.Gpo) '2008 R2: Sysmon 10.42 для старих ОС'
 $p = Get-StartPlan 3 ([version]'6.1.7601') $false $false $false $true '10.42'
 Assert (($p.Local -join ' ') -eq '-Mode Local -SkipSysmon -ConfigureWazuh') '2008 R2 з -NoLegacySysmon: без Sysmon'
 $p = Get-StartPlan 2 ([version]'10.0.20348') $false $false $false $false '10.2'
-Assert ($p.Role -eq 'DomainController' -and ($p.Gpo -join ' ') -eq '-Mode Domain -NoBuild -SetDomainRootSacl -AllowLegacySysmon -LegacySysmonVersion 10.2') 'DC: локально + GPO + SACL для DCSync'
+Assert ($p.Role -eq 'DomainController' -and ($p.Gpo -join ' ') -eq '-Mode Domain -NoBuild -SetDomainRootSacl -AllowLegacySysmon -LegacySysmonVersion 10.2 -DisablePowerShellV2') 'DC: локально + GPO + SACL для DCSync, PowerShell 2.0 вимикається і в домені'
 $p = Get-StartPlan 2 ([version]'10.0.20348') $true $false $false $false '10.42'
 Assert (($p.Local -contains '-AuditOnly') -and ($p.Gpo -contains '-WhatIfGpo')) 'DC -AuditOnly: нічого не змінює, GPO лише -WhatIf'
 Assert ($null -eq (Get-StartPlan 2 ([version]'10.0.20348') $false $false $true $false '10.42').Gpo) 'DC -NoGpo: без GPO'
@@ -393,6 +394,28 @@ Assert ($u.Updated -and $u.From -eq '1.0.0' -and $u.To -eq '1.1.0' -and (Get-Scr
 Assert (-not (Update-PackageScript $srcD $pkgD).Updated) 'однаковий скрипт не копіюється вдруге'
 Assert ((Get-ScriptVersion $main) -match '^\d+\.\d+\.\d+$') "версія основного скрипта читається ($(Get-ScriptVersion $main))"
 Remove-Item -LiteralPath $srcD, $pkgD -Recurse -Force
+
+Write-Host 'Синхронізація часу, LSASS, закріплений реліз'
+Import-ScriptFunctions $main
+Assert ((Test-TimeSync @{ Type = 'NT5DS'; StartMode = 'Auto'; State = 'Running' }).Status -eq 'OK') 'час від домену - OK'
+Assert ((Test-TimeSync @{ Type = 'NTP'; NtpServer = 'time.windows.com,0x9'; StartMode = 'Manual'; State = 'Stopped' }).Status -eq 'OK') 'NTP із ручним запуском (так у робочій групі) - OK'
+Assert ((Test-TimeSync @{ Type = 'NoSync'; StartMode = 'Auto'; State = 'Running' }).Status -eq 'Warning') 'NoSync - попередження'
+Assert ((Test-TimeSync @{ Type = 'NTP'; StartMode = 'Disabled'; State = 'Stopped' }).Status -eq 'Warning') 'служба часу вимкнена - попередження'
+$lsass = @($s.Registry | Where-Object { $_.Path -like '*Image File Execution Options\LSASS.exe' -and $_.Name -eq 'AuditLevel' -and $_.Value -eq 8 -and -not $_.DC })
+Assert ($lsass.Count -eq 1) 'аудит LSASS (AuditLevel=8) на всіх машинах і в GPO'
+$rel = 'v' + (Get-ScriptVersion $main)
+$linuxText = [IO.File]::ReadAllText((Join-Path $root 'linux/set-security-logging.sh'))
+$installText = [IO.File]::ReadAllText((Join-Path $root 'linux/install.sh'))
+$startText = [IO.File]::ReadAllText($start)
+Assert (('v' + ([regex]::Match($linuxText, 'SCRIPT_VERSION="([^"]+)"')).Groups[1].Value) -eq $rel) "версії Windows і Linux однакові ($rel)"
+Assert (([regex]::Match($startText, "\[string\]\`$Ref = '([^']+)'")).Groups[1].Value -eq $rel) "Start-SecLogging.ps1 завантажує реліз $rel"
+Assert (([regex]::Match($installText, 'REF="([^"]+)"')).Groups[1].Value -eq $rel) "linux/install.sh завантажує реліз $rel"
+Assert (([regex]::Match([IO.File]::ReadAllText($installer), "\[string\]\`$RepoRef = '([^']+)'")).Groups[1].Value -eq $rel) "Install-SecLogging.ps1 -Fetch завантажує реліз $rel"
+foreach ($rd in 'README.md', 'README.uk.md') {
+    $txt = [IO.File]::ReadAllText((Join-Path $root $rd))
+    $urls = @([regex]::Matches($txt, 'raw\.githubusercontent\.com/egwyl666/sec_journal_on/([^/]+)/(windows/Start-SecLogging\.ps1|linux/install\.sh)') | ForEach-Object { $_.Groups[1].Value })
+    Assert ($urls.Count -ge 4 -and @($urls | Where-Object { $_ -ne $rel }).Count -eq 0) "${rd}: однорядкові команди вказують на $rel [$($urls | Sort-Object -Unique)]"
+}
 
 Write-Host ''
 Write-Host "Пройдено: $script:passed  Не пройдено: $script:failed"

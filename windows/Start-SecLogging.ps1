@@ -7,7 +7,7 @@
     Запуск (PowerShell або cmd від імені адміністратора, потрібен інтернет). У рядку навмисно
     немає змінних ($): інакше PowerShell, у який його вставили, підставив би їх ще до запуску.
 
-      powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
 
     Що робить:
       1. Завантажує архів репозиторію з GitHub (або бере -Source).
@@ -27,7 +27,7 @@
 .PARAMETER Source
     Тека з розпакованим репозиторієм або .zip архів (для машин без доступу до GitHub).
 .PARAMETER Ref
-    Гілка/тег/коміт репозиторію. За замовчуванням HEAD.
+    Гілка/тег/коміт репозиторію. За замовчуванням - закріплений реліз (див. $Ref нижче).
 .PARAMETER SkipSysmon
     Не встановлювати Sysmon (лише журнали й аудит).
 .PARAMETER NoGpo
@@ -36,6 +36,9 @@
     Версія Sysmon для 2008/2008 R2/Win7: 10.42 (за замовчуванням) або 10.2.
 .PARAMETER NoLegacySysmon
     На старій ОС не встановлювати Sysmon.
+.PARAMETER KeepPowerShellV2
+    Не вимикати PowerShell 2.0 (за замовчуванням вимикається на Win8/2012 і новіших:
+    через "powershell -version 2" зловмисник обходить журналювання PowerShell).
 .EXAMPLE
     # з параметрами: той самий рядок, параметри після останньої дужки
     powershell -NoProfile -ExecutionPolicy Bypass -Command "... .TrimStart([char]0xFEFF))) -AuditOnly"
@@ -46,12 +49,13 @@
 param(
     [switch]$AuditOnly,
     [string]$Source,
-    [string]$Ref = 'HEAD',
+    [string]$Ref = 'v1.3.0',
     [switch]$SkipSysmon,
     [switch]$NoGpo,
     [ValidateSet('10.42', '10.2')]
     [string]$LegacySysmonVersion = '10.42',
     [switch]$NoLegacySysmon,
+    [switch]$KeepPowerShellV2,
     [string]$RepoOwner = 'egwyl666',
     [string]$RepoName = 'sec_journal_on'
 )
@@ -78,7 +82,7 @@ function Say {
 
 function Get-StartPlan {
     # Що запускати для цієї машини. ProductType: 1 = робоча станція, 2 = DC, 3 = сервер.
-    param([int]$ProductType, [version]$OSVersion, [bool]$AuditOnly, [bool]$SkipSysmon, [bool]$NoGpo, [bool]$NoLegacySysmon, [string]$LegacySysmonVersion)
+    param([int]$ProductType, [version]$OSVersion, [bool]$AuditOnly, [bool]$SkipSysmon, [bool]$NoGpo, [bool]$NoLegacySysmon, [string]$LegacySysmonVersion, [bool]$KeepPowerShellV2 = $false)
     $role = @{ 1 = 'Workstation'; 2 = 'DomainController'; 3 = 'Server' }[$ProductType]
     if (-not $role) { $role = 'Server' }
     $legacy = ($OSVersion -lt [version]'6.2')
@@ -86,12 +90,14 @@ function Get-StartPlan {
     if ($AuditOnly) { $local += '-AuditOnly' }
     if ($SkipSysmon -or ($legacy -and $NoLegacySysmon)) { $local += '-SkipSysmon' }
     elseif ($legacy) { $local += @('-AllowLegacySysmon', '-LegacySysmonVersion', $LegacySysmonVersion) }
+    if (-not $legacy -and -not $KeepPowerShellV2) { $local += '-DisablePowerShellV2' }
     $local += '-ConfigureWazuh'
     $gpo = $null
     if ($role -eq 'DomainController' -and -not $NoGpo) {
         # пакет уже зібрано локальним кроком; startup-скрипт на старих ОС ставить Sysmon $LegacySysmonVersion
         $gpo = @('-Mode', 'Domain', '-NoBuild', '-SetDomainRootSacl', '-AllowLegacySysmon', '-LegacySysmonVersion', $LegacySysmonVersion)
         if ($SkipSysmon) { $gpo += '-SkipSysmon' }
+        if (-not $KeepPowerShellV2) { $gpo += '-DisablePowerShellV2' }   # на старих ОС скрипт сам пропускає
         if ($AuditOnly) { $gpo += '-WhatIfGpo' }
     }
     @{ Role = $role; Legacy = $legacy; Local = $local; Gpo = $gpo }
@@ -152,7 +158,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 $work = Join-Path $env:ProgramData 'SecLogging'
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 $os = Get-WmiObject Win32_OperatingSystem
-$plan = Get-StartPlan ([int]$os.ProductType) ([version]$os.Version) ([bool]$AuditOnly) ([bool]$SkipSysmon) ([bool]$NoGpo) ([bool]$NoLegacySysmon) $LegacySysmonVersion
+$plan = Get-StartPlan ([int]$os.ProductType) ([version]$os.Version) ([bool]$AuditOnly) ([bool]$SkipSysmon) ([bool]$NoGpo) ([bool]$NoLegacySysmon) $LegacySysmonVersion ([bool]$KeepPowerShellV2)
 Say ('SecLogging: {0} ({1}), роль {2}{3}' -f $os.Caption, $os.Version, $plan.Role, $(if ($AuditOnly) { ', ЛИШЕ ПЕРЕВІРКА' } else { '' })) ('SecLogging: {0} ({1}), role {2}{3}' -f $os.Caption, $os.Version, $plan.Role, $(if ($AuditOnly) { ', CHECK ONLY' } else { '' })) White
 
 # ---------------------------------------------------------------- 1. файли

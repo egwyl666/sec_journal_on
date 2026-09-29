@@ -14,8 +14,8 @@ for img in $IMAGES; do
     docker run --rm "${net_args[@]}" -v "$ROOT/linux:/src:ro" -v "$ROOT/tests:/tests:ro" "$img" sh -c '
         [ -f /ca.crt ] && [ -n "${https_proxy:-}" ] && sh /tests/fixtures/container-net.sh >/dev/null 2>&1
         # пакети: rsyslog, logrotate, auditd - якщо дзеркала доступні
-        if command -v apt-get >/dev/null; then apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsyslog logrotate auditd >/dev/null 2>&1
-        elif command -v dnf >/dev/null; then dnf install -y -q rsyslog logrotate audit >/dev/null 2>&1
+        if command -v apt-get >/dev/null; then apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsyslog logrotate auditd openssh-server >/dev/null 2>&1
+        elif command -v dnf >/dev/null; then dnf install -y -q rsyslog logrotate audit openssh-server >/dev/null 2>&1
         elif command -v yum >/dev/null; then yum install -y -q rsyslog logrotate audit >/dev/null 2>&1
         elif command -v zypper >/dev/null; then zypper -n -q in rsyslog logrotate audit >/dev/null 2>&1
         elif command -v pacman >/dev/null; then pacman -S --noconfirm --needed audit logrotate >/dev/null 2>&1

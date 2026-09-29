@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # set-security-logging.sh - визначає хост, перевіряє та вмикає журналювання безпеки Linux:
 #   auditd (+ правила), постійне зберігання і розмір journald, наявність/ротація auth-логу,
+#   LogLevel VERBOSE для sshd (відбиток ключа при вході), перевірка синхронізації часу,
 #   збір журналів агентом Wazuh. Лише штатні засоби Linux, без сторонніх агентів.
 #
 # Порядок: визначення -> поточний стан -> застосувати лише відсутнє -> перевірка -> звіт.
@@ -21,7 +22,7 @@
 set -u
 umask 027
 
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.3.0"
 CHECK=0
 PROFILE="auto"
 CONFIGURE_WAZUH=0
@@ -208,6 +209,12 @@ svc_restart() {
     if have service; then service "$s" restart >/dev/null 2>&1 && return 0; fi
     if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl restart "$s" >/dev/null 2>&1 && return 0; fi
     [ -x "/etc/init.d/$s" ] && "/etc/init.d/$s" restart >/dev/null 2>&1
+}
+
+svc_reload_or_restart() {
+    local s="$1"
+    if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl reload-or-restart "$s" >/dev/null 2>&1; return $?; fi
+    svc_restart "$s"
 }
 
 svc_start() {
@@ -540,6 +547,92 @@ do_authlog() {
     else result authlog logrotate Warning "$f: зберігається лише ~${days} дн. (rotate ${rot:-?} ${period:-?}), потрібно >= 7"; fi
 }
 
+# ------------------------------------------------------------------ sshd: LogLevel VERBOSE
+
+SSHD_DROPIN="/etc/ssh/sshd_config.d/01-seclogging.conf"
+
+# LogLevel із файлів конфігу без sshd -T: перше значення до першого Match (drop-in-и - якщо Include на початку)
+sshd_loglevel_static() {
+    local files=() f
+    if grep -qiE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config 2>/dev/null; then
+        for f in /etc/ssh/sshd_config.d/*.conf; do [ -f "$f" ] && files+=("$f"); done
+    fi
+    files+=(/etc/ssh/sshd_config)
+    awk 'tolower($1)=="match"{exit} tolower($1)=="loglevel"{print toupper($2); found=1; exit} END{if(!found) print "INFO"}' "${files[@]}" 2>/dev/null
+}
+
+# фактичний LogLevel sshd, у верхньому регістрі: sshd -T, а якщо він не працює - з файлів конфігу
+sshd_loglevel() {
+    local v; v=$(sshd -T 2>/dev/null | awk 'tolower($1)=="loglevel"{print toupper($2); exit}')
+    [ -n "$v" ] && { echo "$v"; return; }
+    sshd_loglevel_static
+}
+
+do_ssh() {
+    # VERBOSE: у журнал автентифікації потрапляє відбиток ключа, яким виконано вхід (видно, чий це ключ)
+    if [ ! -f /etc/ssh/sshd_config ] || ! have sshd; then result ssh sshd Skipped "OpenSSH-сервер не встановлено"; return; fi
+    local cur; cur=$(sshd_loglevel)
+    # sshd -T потребує ключів хоста і /run/sshd; коли служба не запущена, їх може не бути
+    if [ "$CHECK" -eq 0 ] && ! sshd -T >/dev/null 2>&1; then
+        [ -d /run/sshd ] || { mkdir /run/sshd && chmod 0755 /run/sshd; } 2>/dev/null
+        have ssh-keygen && ssh-keygen -A >/dev/null 2>&1
+        cur=$(sshd_loglevel)
+    fi
+    case "$cur" in
+        VERBOSE|DEBUG*) result ssh LogLevel OK "$cur"; return ;;
+        '') result ssh LogLevel Warning "не вдалося прочитати конфіг (sshd -T)"; return ;;
+    esac
+    if [ "$CHECK" -eq 1 ]; then result ssh LogLevel WouldChange "$cur -> VERBOSE"; return; fi
+    local how
+    # sshd бере ПЕРШЕ знайдене значення: drop-in з "01-" діє, лише якщо Include стоїть на початку sshd_config
+    if [ -d /etc/ssh/sshd_config.d ] && grep -qiE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config; then
+        printf '# Керується set-security-logging.sh: відбиток ключа при вході в журналі автентифікації\nLogLevel VERBOSE\n' > "$SSHD_DROPIN"
+        how="$SSHD_DROPIN"
+    fi
+    if [ "$(sshd_loglevel)" != "VERBOSE" ]; then
+        # немає Include (або його перекрито): рядок на початок sshd_config, до будь-яких Match
+        rm -f "$SSHD_DROPIN"
+        backup_once /etc/ssh/sshd_config
+        sed -i -E 's/^([[:space:]]*LogLevel[[:space:]].*)$/# \1  # замінено set-security-logging.sh/I' /etc/ssh/sshd_config
+        sed -i '1i LogLevel VERBOSE' /etc/ssh/sshd_config
+        how="/etc/ssh/sshd_config"
+    fi
+    if ! sshd -t 2>/dev/null; then
+        # конфіг зламано - повертаємо як було, sshd не перезапускаємо
+        rm -f "$SSHD_DROPIN"; [ -f /etc/ssh/sshd_config.seclogging.bak ] && cp -p /etc/ssh/sshd_config.seclogging.bak /etc/ssh/sshd_config
+        result ssh LogLevel Error "sshd -t відхилив конфіг, зміни скасовано"; return
+    fi
+    local s
+    if [ "$IN_CONTAINER" -eq 0 ]; then for s in ssh sshd; do svc_active "$s" && svc_reload_or_restart "$s" && break; done; fi
+    if [ "$(sshd_loglevel)" = "VERBOSE" ]; then result ssh LogLevel Changed "$cur -> VERBOSE ($how)"
+    else result ssh LogLevel Error "LogLevel лишився $(sshd_loglevel)"; fi
+}
+
+# ------------------------------------------------------------------ синхронізація часу
+
+# стан синхронізації: yes / no / unknown
+time_synced() {
+    local v
+    if have timedatectl; then
+        v=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+        [ -z "$v" ] && v=$(timedatectl status 2>/dev/null | awk -F: 'tolower($1) ~ /synchronized/ {gsub(/ /,"",$2); print $2; exit}')
+        case "$v" in yes) echo yes; return ;; no) echo no; return ;; esac
+    fi
+    if have chronyc; then chronyc -n tracking 2>/dev/null | grep -qiE '^Leap status *: *Normal' && { echo yes; return; }; echo no; return; fi
+    if have ntpstat; then ntpstat >/dev/null 2>&1 && echo yes || echo no; return; fi
+    echo unknown
+}
+
+do_time() {
+    # лише перевірка: розбіжний час ламає зіставлення подій між машинами
+    if [ "$IN_CONTAINER" -eq 1 ]; then result time sync Skipped "контейнер: час належить хосту"; return; fi
+    case "$(time_synced)" in
+        yes) result time sync OK "час синхронізовано" ;;
+        no) result time sync Warning "час не синхронізовано (NTP): події на різних машинах важко зіставити - увімкніть timedatectl set-ntp true / chronyd" ;;
+        *) result time sync Warning "не вдалося визначити стан синхронізації часу (немає timedatectl/chronyc/ntpstat)" ;;
+    esac
+}
+
 # ------------------------------------------------------------------ Wazuh
 
 do_wazuh() {
@@ -608,6 +701,8 @@ state_snapshot() {
         v=$(journald_value SystemMaxUse); printf 'journald\tSystemMaxUse\t%s\n' "${v:-(за замовчуванням)}"
         printf 'journald\t/var/log/journal\t%s\n' "$([ -d /var/log/journal ] && echo є || echo немає)"
     fi
+    if have sshd && [ -f /etc/ssh/sshd_config ]; then v=$(sshd_loglevel); printf 'ssh\tLogLevel\t%s\n' "${v:-(невідомо)}"; fi
+    [ "$IN_CONTAINER" -eq 0 ] && printf 'time\tсинхронізація\t%s\n' "$(time_synced)"
     printf 'syslog\tдемон\t%s\n' "$(if have rsyslogd; then echo rsyslog; elif have syslog-ng; then echo syslog-ng; else echo немає; fi)"
     for f in /var/log/auth.log /var/log/secure /var/log/messages /var/log/syslog; do
         [ -f "$f" ] && printf 'syslog\t%s\tє\n' "$f"
@@ -680,6 +775,8 @@ main() {
     do_auditd
     do_journald
     do_authlog
+    do_ssh
+    do_time
     do_wazuh
 
     local finished; finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
