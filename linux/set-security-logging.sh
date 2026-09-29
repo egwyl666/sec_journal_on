@@ -21,7 +21,7 @@
 set -u
 umask 027
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 CHECK=0
 PROFILE="auto"
 CONFIGURE_WAZUH=0
@@ -372,6 +372,9 @@ audit_version_ge() {
     [ -n "$cur" ] && ver_ge "$cur" "$1"
 }
 
+# Наші правила завантажені в ядро? auditctl -l друкує ключ як "-k identity" для -w і "-F key=identity" для -a
+rules_active() { auditctl -l 2>/dev/null | grep -qE '(-k |key=)identity( |$)'; }
+
 do_auditd() {
     if ! have auditctl; then
         if [ "$CHECK" -eq 1 ]; then result auditd package WouldChange "встановити auditd"; return
@@ -459,13 +462,13 @@ do_auditd() {
     fi
     if svc_active auditd; then result auditd service OK "працює"; else result auditd service Error "auditd не працює"; fi
 
-    if [ "${RULES_CHANGED:-0}" -eq 1 ] || ! auditctl -l 2>/dev/null | grep -q 'key=identity'; then
+    if [ "${RULES_CHANGED:-0}" -eq 1 ] || ! rules_active; then
         if [ "$enabled" = "2" ]; then
             result auditd "завантаження правил" Warning "правила аудиту незмінні (-e 2): нові правила діятимуть після перезавантаження"
         else
             local out
             if have augenrules; then out=$(augenrules --load 2>&1); else out=$(auditctl -R "$RULES_FILE" 2>&1); fi
-            if auditctl -l 2>/dev/null | grep -q 'key=identity'; then
+            if rules_active; then
                 result auditd "завантаження правил" Changed "завантажено, активних правил: $(auditctl -l 2>/dev/null | grep -c .)"
             else
                 result auditd "завантаження правил" Error "правила не активні: $(printf '%s' "$out" | tail -3)"

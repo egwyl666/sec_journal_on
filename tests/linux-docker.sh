@@ -5,7 +5,7 @@
 #   За корпоративним проксі (лише HTTPS): CA_FILE=/path/ca.crt PROXY=$HTTPS_PROXY ./tests/linux-docker.sh
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-IMAGES=${IMAGES:-"ubuntu:24.04 ubuntu:20.04 debian:12 linuxmintd/mint21.3-amd64 rockylinux:9 rockylinux:8 almalinux:9 oraclelinux:9 centos:7 fedora:40 amazonlinux:2023 opensuse/leap:15.6 archlinux:latest alpine:3.20"}
+IMAGES=${IMAGES:-"ubuntu:26.04 ubuntu:24.04 ubuntu:20.04 debian:12 linuxmintd/mint21.3-amd64 rockylinux:9 rockylinux:8 almalinux:9 oraclelinux:9 centos:7 fedora:40 amazonlinux:2023 opensuse/leap:15.6 archlinux:latest alpine:3.20"}
 net_args=(); [ -n "${PROXY:-}" ] && net_args=(--network host -e "https_proxy=$PROXY" -e "HTTPS_PROXY=$PROXY")
 [ -n "${CA_FILE:-}" ] && net_args+=(-v "$CA_FILE:/ca.crt:ro")
 fail=0; passed=(); skipped=()
