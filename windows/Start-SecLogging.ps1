@@ -7,7 +7,7 @@
     Запуск (PowerShell або cmd від імені адміністратора, потрібен інтернет). У рядку навмисно
     немає змінних ($): інакше PowerShell, у який його вставили, підставив би їх ще до запуску.
 
-      powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.1/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
 
     Що робить:
       1. Завантажує архів репозиторію з GitHub (або бере -Source).
@@ -49,7 +49,7 @@
 param(
     [switch]$AuditOnly,
     [string]$Source,
-    [string]$Ref = 'v1.3.0',
+    [string]$Ref = 'v1.3.1',
     [switch]$SkipSysmon,
     [switch]$NoGpo,
     [ValidateSet('10.42', '10.2')]
@@ -106,6 +106,9 @@ function Get-StartPlan {
 function Expand-Zip {
     param([string]$ZipPath, [string]$Destination)
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    # повні шляхи: і ZipFile, і Shell.Application рахують відносні від поточної теки процесу, а не від $PWD
+    $ZipPath = (Resolve-Path -LiteralPath $ZipPath).ProviderPath
+    $Destination = (Resolve-Path -LiteralPath $Destination).ProviderPath
     try {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
@@ -114,6 +117,15 @@ function Expand-Zip {
         # .NET < 4.5 (Server 2008 R2 без оновлень): через Shell
         $shell = New-Object -ComObject Shell.Application
         $shell.NameSpace($Destination).CopyHere($shell.NameSpace($ZipPath).Items(), 0x14)
+    }
+}
+
+function Remove-OldRepoCopies {
+    # Кожен запуск розпаковує репозиторій у нову теку repo-<час>; старі копії більше не потрібні
+    param([string]$WorkDir, [string]$Keep)
+    foreach ($d in @(Get-ChildItem -LiteralPath $WorkDir -Filter 'repo-*' -ErrorAction SilentlyContinue | Where-Object { $_.PSIsContainer })) {
+        if ($Keep -and $d.FullName -eq $Keep) { continue }
+        Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -141,6 +153,7 @@ function Invoke-Step {
     # Вивід іде прямо в консоль (Start-Process), інакше він змішався б з кодом виходу.
     param([string]$Script, [string[]]$Arguments)
     $ps = Join-Path $PSHOME 'powershell.exe'
+    if (-not (Test-Path -LiteralPath $ps)) { $ps = 'powershell.exe' }
     $line = ConvertTo-ArgLine (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Script) + $Arguments)
     $proc = Start-Process -FilePath $ps -ArgumentList $line -NoNewWindow -Wait -PassThru
     [int]$proc.ExitCode
@@ -148,7 +161,12 @@ function Invoke-Step {
 
 if ($MyInvocation.InvocationName -eq '.') { return }   # dot-source для тестів: лише функції
 
-# ---------------------------------------------------------------- 0. права
+# ---------------------------------------------------------------- 0. середовище і права
+if ($PSVersionTable.PSEdition -eq 'Core') {
+    # PowerShell 7 не має Get-WmiObject і частини модулів Windows: скрипти розраховані на Windows PowerShell
+    Say 'Запустіть у Windows PowerShell (powershell.exe), а не в PowerShell 7 (pwsh).' 'Run in Windows PowerShell (powershell.exe), not PowerShell 7 (pwsh).' Red
+    return
+}
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Say 'Потрібні права адміністратора: відкрийте PowerShell через "Запуск від імені адміністратора" і вставте команду ще раз.' 'Administrator rights required: open PowerShell with "Run as administrator" and paste the command again.' Red
@@ -192,6 +210,7 @@ else {
     }
 }
 if (-not $root) { Say 'Не знайдено windows\Install-SecLogging.ps1 у джерелі.' 'windows\Install-SecLogging.ps1 not found in the source.' Red; return }
+if ($dst -and $root.StartsWith($dst)) { Remove-OldRepoCopies $work $dst }
 $installer = Join-Path $root 'windows\Install-SecLogging.ps1'
 $mainScript = Join-Path $root 'windows\Set-SecurityLogging.ps1'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -210,13 +229,11 @@ $codeLocal = Invoke-Step $installer $plan.Local
 # ---------------------------------------------------------------- 3. домен (лише DC)
 $codeGpo = 0
 if ($plan.Gpo) {
-    if ($codeLocal -ne 0 -and -not $AuditOnly) {
-        Say '==> GPO пропущено: налаштування DC завершилося з помилками' '==> GPO skipped: configuring the DC finished with errors' Yellow
-    }
-    else {
-        Say '==> Доменні GPO (усі машини домену налаштуються самі при завантаженні)' '==> Domain GPOs (all domain machines will configure themselves at boot)' Cyan
-        $codeGpo = Invoke-Step $installer $plan.Gpo
-    }
+    # GPO не залежать від того, чи все вдалося на самому DC (напр. один журнал без доступу), тому крок виконується завжди:
+    # без GPO доменна політика аудиту за кілька хвилин скидає локальні налаштування DC
+    if ($codeLocal -ne 0) { Say '    (на цьому DC були помилки - див. звіт; GPO все одно створюємо)' '    (this DC had errors - see the report; creating GPOs anyway)' Yellow }
+    Say '==> Доменні GPO (усі машини домену налаштуються самі при завантаженні)' '==> Domain GPOs (all domain machines will configure themselves at boot)' Cyan
+    $codeGpo = Invoke-Step $installer $plan.Gpo
 }
 
 # ---------------------------------------------------------------- 4. що змінилося

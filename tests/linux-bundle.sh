@@ -19,6 +19,16 @@ docker run --rm "${net_args[@]}" -v "$ROOT/linux:/src:ro" -v "$ROOT/tests:/tests
     /src/install.sh build --out /out/b' || { echo "ПОМИЛКА: build"; exit 1; }
 ls "$OUT/b/auditd" | head -20
 
+# "curl ... | bash -s build": $0 - це bash, install.sh має потрапити в комплект із GitHub (реліз PIPE_REF)
+PIPE_REF=${PIPE_REF:-$(sed -n 's/^REF="\([^"]*\)".*/\1/p' "$ROOT/linux/install.sh")}
+echo "=== build через конвеєр (--ref $PIPE_REF)"
+docker run --rm "${net_args[@]}" -v "$ROOT/linux:/src:ro" -v "$ROOT/tests:/tests:ro" "$IMAGE" bash -c '
+    [ -f /ca.crt ] && [ -n "${https_proxy:-}" ] && sh /tests/fixtures/container-net.sh >/dev/null 2>&1
+    if command -v apt-get >/dev/null; then apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates >/dev/null 2>&1; fi
+    bash -s build --out /tmp/p --ref "$1" < /src/install.sh >/dev/null || exit 1
+    [ -x /tmp/p/install.sh ] && [ -x /tmp/p/set-security-logging.sh ] && bash -n /tmp/p/install.sh' _ "$PIPE_REF" \
+    || { echo "ПОМИЛКА: build через конвеєр"; exit 1; }
+
 echo "=== офлайн-встановлення (--network none)"
 docker run --rm --network none -v "$OUT/b:/bundle:ro" "$IMAGE" bash -c "
     command -v auditctl >/dev/null && { echo 'auditctl уже є в образі - тест не показовий'; exit 1; }

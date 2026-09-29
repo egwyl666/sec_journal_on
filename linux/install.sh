@@ -3,7 +3,7 @@
 #
 # Одна команда (root, потрібен інтернет):
 #   (curl -fsSL URL 2>/dev/null || wget -qO- URL) | sudo bash
-#   де URL = https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.0/linux/install.sh
+#   де URL = https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.1/linux/install.sh
 #   (працює і там, де є лише curl - мінімальні RHEL, і де лише wget - Ubuntu Desktop)
 # Знімає стан "до" і "після" і записує, що змінилося: /var/log/seclogging/changes/<час>-changes.txt
 #
@@ -31,7 +31,7 @@ set -u
 umask 022
 
 REPO_RAW="https://raw.githubusercontent.com/egwyl666/sec_journal_on"
-REF="v1.3.0"   # закріплений реліз; --ref HEAD - остання версія
+REF="v1.3.1"   # закріплений реліз; --ref HEAD - остання версія
 CMD="install"
 FROM=""
 OUT=""
@@ -157,7 +157,15 @@ do_build() {
 
     local main; main=$(get_main_script) || die "не вдалося отримати set-security-logging.sh"
     install -m 0755 "$main" "$OUT/set-security-logging.sh"
-    install -m 0755 "$0" "$OUT/install.sh"
+    # сам install.sh: при запуску через "curl ... | bash" файлу $0 немає - завантажуємо ту саму версію
+    if [ -f "$0" ]; then install -m 0755 "$0" "$OUT/install.sh" || die "не вдалося скопіювати install.sh"
+    else
+        if ! { download "$REPO_RAW/$REF/linux/install.sh" "$OUT/install.sh" && bash -n "$OUT/install.sh"; }; then
+            die "не вдалося завантажити install.sh ($REPO_RAW/$REF/linux/install.sh)"
+        fi
+        chmod 0755 "$OUT/install.sh"
+    fi
+    if [ ! -s "$OUT/install.sh" ] || [ ! -s "$OUT/set-security-logging.sh" ]; then die "у комплекті бракує скриптів"; fi
     echo "    скрипти скопійовано"
 
     [ "$FAMILY" = "deb" ] && apt-get update -qq >/dev/null 2>&1

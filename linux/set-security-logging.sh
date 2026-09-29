@@ -22,7 +22,7 @@
 set -u
 umask 027
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 CHECK=0
 PROFILE="auto"
 CONFIGURE_WAZUH=0
@@ -33,6 +33,8 @@ SNAPSHOT=""
 CMP_BEFORE=""; CMP_AFTER=""; CMP_OUT=""
 
 RULES_FILE="/etc/audit/rules.d/50-seclogging.rules"
+# augenrules бере ОСТАННЄ -b у порядку файлів: наш -b - в окремому файлі, що обробляється останнім
+BACKLOG_FILE="/etc/audit/rules.d/zz-seclogging-backlog.rules"
 JOURNALD_DROPIN="/etc/systemd/journald.conf.d/50-seclogging.conf"
 MARK_BEGIN="<!-- SecLogging BEGIN (managed by set-security-logging.sh) -->"
 MARK_END="<!-- SecLogging END -->"
@@ -335,13 +337,25 @@ AUDIT_RULES_TEMPLATE='
 @b32 -a always,exit -F arch=b32 -S execve -F auid!=4294967295 -k audit-wazuh-c
 '
 
+# потрібний розмір черги аудиту: не менше 8192 і не менше найбільшого -b в інших файлах (лише підвищуємо)
+backlog_want() {
+    local b f
+    b=$(for f in /etc/audit/rules.d/*.rules; do
+            [ "$f" != "$RULES_FILE" ] && [ "$f" != "$BACKLOG_FILE" ] && [ -f "$f" ] && grep -hsE '^-b[[:space:]]+[0-9]+' "$f"
+        done | awk '{print $2}' | sort -n | tail -1)
+    if [ "${b:-0}" -gt 8192 ]; then echo "$b"; else echo 8192; fi
+}
+
+render_backlog_rules() {
+    echo "## Керується set-security-logging.sh: файл обробляється останнім, тому цей -b діє (augenrules бере останній)"
+    echo "-b $(backlog_want)"
+}
+
 render_audit_rules() {
     local line path uid u
     echo "## Керується set-security-logging.sh $SCRIPT_VERSION - не редагуйте, натомість перезапустіть скрипт"
-    # backlog: лише підвищуємо (інші файли rules.d можуть уже задавати більше)
-    local b f
-    b=$(for f in /etc/audit/rules.d/*.rules; do [ "$f" != "$RULES_FILE" ] && [ -f "$f" ] && grep -hsE '^-b[[:space:]]+[0-9]+' "$f"; done | awk '{print $2}' | sort -n | tail -1)
-    [ "${b:-0}" -lt 8192 ] && echo "-b 8192"
+    # -b тут - для завантаження без augenrules (auditctl -R лише цього файлу); з augenrules діє $BACKLOG_FILE
+    echo "-b $(backlog_want)"
     echo "-a always,exclude -F msgtype=EOE"
     while IFS= read -r line; do
         case "$line" in
@@ -377,6 +391,15 @@ audit_version_ge() {
     local cur; cur=$( { auditctl -v 2>/dev/null; dpkg-query -W -f='${Version}\n' auditd 2>/dev/null; rpm -q --qf '%{VERSION}\n' audit 2>/dev/null; } \
         | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
     [ -n "$cur" ] && ver_ge "$cur" "$1"
+}
+
+# Перечитати auditd.conf без перезапуску: RHEL забороняє "systemctl restart auditd" (RefuseManualStop),
+# а утиліти service у мінімальній установці може не бути. SIGHUP - штатне перечитування конфігу auditd.
+auditd_reload() {
+    auditctl --signal reload >/dev/null 2>&1 && return 0
+    local pid; pid=$(pidof auditd 2>/dev/null) || return 1
+    # shellcheck disable=SC2086
+    kill -HUP $pid 2>/dev/null
 }
 
 # Наші правила завантажені в ядро? auditctl -l друкує ключ як "-k identity" для -w і "-F key=identity" для -a
@@ -443,6 +466,18 @@ do_auditd() {
     fi
     rm -f "$tmp"
 
+    # --- розмір черги аудиту (-b), окремим останнім файлом
+    local want_b; want_b=$(backlog_want)
+    if [ -f "$BACKLOG_FILE" ] && [ "$(render_backlog_rules)" = "$(cat "$BACKLOG_FILE")" ]; then
+        result auditd "-b (черга)" OK "$want_b"
+    elif [ "$CHECK" -eq 1 ]; then
+        result auditd "-b (черга)" WouldChange "$BACKLOG_FILE: -b $want_b"
+    else
+        render_backlog_rules > "$BACKLOG_FILE"; chmod 0640 "$BACKLOG_FILE"
+        RULES_CHANGED=1
+        result auditd "-b (черга)" Changed "-b $want_b ($BACKLOG_FILE)"
+    fi
+
     if [ "$IMMUTABLE" -eq 1 ]; then
         local fin=/etc/audit/rules.d/99-finalize.rules
         if grep -qsE '^-e[[:space:]]+2' /etc/audit/rules.d/*.rules; then result auditd immutable OK "-e 2 присутній"
@@ -465,7 +500,7 @@ do_auditd() {
         svc_start auditd
         AUDITD_RESTART=0
     elif [ "${AUDITD_RESTART:-0}" -eq 1 ]; then
-        svc_restart auditd || result auditd service Error "перезапуск не вдався"
+        svc_restart auditd || auditd_reload || result auditd service Error "не вдалося ні перезапустити auditd, ні перечитати конфіг (SIGHUP)"
     fi
     if svc_active auditd; then result auditd service OK "працює"; else result auditd service Error "auditd не працює"; fi
 
@@ -583,25 +618,36 @@ do_ssh() {
         '') result ssh LogLevel Warning "не вдалося прочитати конфіг (sshd -T)"; return ;;
     esac
     if [ "$CHECK" -eq 1 ]; then result ssh LogLevel WouldChange "$cur -> VERBOSE"; return; fi
-    local how
+    # конфіг уже з помилками - не чіпаємо: інакше sshd -t після нашої зміни впаде не через нас
+    if ! sshd -t >/dev/null 2>&1; then
+        result ssh LogLevel Warning "sshd -t відхиляє поточний конфіг (помилка вже є): LogLevel не змінено, виправте sshd_config"; return
+    fi
+    local how snap; snap=$(mktemp)
+    # свіжа копія саме цього стану - для відкату (не стара .seclogging.bak з першого запуску)
+    cp -p /etc/ssh/sshd_config "$snap"
     # sshd бере ПЕРШЕ знайдене значення: drop-in з "01-" діє, лише якщо Include стоїть на початку sshd_config
     if [ -d /etc/ssh/sshd_config.d ] && grep -qiE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config; then
         printf '# Керується set-security-logging.sh: відбиток ключа при вході в журналі автентифікації\nLogLevel VERBOSE\n' > "$SSHD_DROPIN"
         how="$SSHD_DROPIN"
     fi
     if [ "$(sshd_loglevel)" != "VERBOSE" ]; then
-        # немає Include (або його перекрито): рядок на початок sshd_config, до будь-яких Match
+        # немає Include (або його перекрито): рядок на початок sshd_config; глобальні LogLevel - у коментар,
+        # LogLevel усередині блоків Match (навмисні винятки для окремих користувачів) не чіпаємо
         rm -f "$SSHD_DROPIN"
         backup_once /etc/ssh/sshd_config
-        sed -i -E 's/^([[:space:]]*LogLevel[[:space:]].*)$/# \1  # замінено set-security-logging.sh/I' /etc/ssh/sshd_config
-        sed -i '1i LogLevel VERBOSE' /etc/ssh/sshd_config
+        local tmp; tmp=$(mktemp)
+        { echo 'LogLevel VERBOSE'
+          awk 'tolower($1)=="match"{m=1} !m && tolower($1)=="loglevel"{print "# " $0 "  # замінено set-security-logging.sh"; next} {print}' "$snap"
+        } > "$tmp"
+        cat "$tmp" > /etc/ssh/sshd_config; rm -f "$tmp"
         how="/etc/ssh/sshd_config"
     fi
     if ! sshd -t 2>/dev/null; then
-        # конфіг зламано - повертаємо як було, sshd не перезапускаємо
-        rm -f "$SSHD_DROPIN"; [ -f /etc/ssh/sshd_config.seclogging.bak ] && cp -p /etc/ssh/sshd_config.seclogging.bak /etc/ssh/sshd_config
+        # наша зміна зламала конфіг - повертаємо рівно те, що було перед нею; sshd не перезапускаємо
+        rm -f "$SSHD_DROPIN"; cat "$snap" > /etc/ssh/sshd_config; rm -f "$snap"
         result ssh LogLevel Error "sshd -t відхилив конфіг, зміни скасовано"; return
     fi
+    rm -f "$snap"
     local s
     if [ "$IN_CONTAINER" -eq 0 ]; then for s in ssh sshd; do svc_active "$s" && svc_reload_or_restart "$s" && break; done; fi
     if [ "$(sshd_loglevel)" = "VERBOSE" ]; then result ssh LogLevel Changed "$cur -> VERBOSE ($how)"

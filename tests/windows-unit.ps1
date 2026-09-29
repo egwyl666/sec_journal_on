@@ -185,6 +185,23 @@ $s3 = & $main -ExportSettings
 Invoke-AuditPolicy $s3 'Workstation'
 Assert ($global:Calls.Count -eq 0 -and $Script:Counts.Changed -eq 0) 'повторний запуск нічого не змінює'
 
+# доменна GPO аудиту (audit.csv): решта підкатегорій після оновлення політик скинеться - лише Warning, не Changed
+$oldRoot = $env:SystemRoot
+$env:SystemRoot = Join-Path ([IO.Path]::GetTempPath()) ('sr-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path (Join-Path $env:SystemRoot 'security/audit') -Force | Out-Null
+[IO.File]::WriteAllLines((Join-Path $env:SystemRoot 'security/audit/audit.csv'), [string[]]@(
+    'Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value'
+    ',System,Logon,{0CCE9215-69AE-11D9-BED3-505054503030},Success and Failure,,3'))
+foreach ($a in $s.AuditPolicy) { $global:AuditState[$a.Guid.ToUpper()] = 0 }
+$global:AuditState['0CCE9215-69AE-11D9-BED3-505054503030'] = 3
+$Script:Report = @(); $Script:Counts = @{ OK = 0; Changed = 0; WouldChange = 0; Warning = 0; Error = 0; Skipped = 0 }
+$s4 = & $main -ExportSettings
+Invoke-AuditPolicy $s4 'Workstation'
+$pc = @($Script:Report | Where-Object { $_.Item -eq 'Process Creation' })[0]
+Assert ($pc.Status -eq 'Warning' -and $pc.Message -match 'тимчасово' -and $Script:Counts.Changed -eq 0 -and $Script:Counts.Error -eq 0) 'під доменною GPO аудиту локальні зміни позначено як тимчасові (Warning)'
+Remove-Item -LiteralPath $env:SystemRoot -Recurse -Force
+$env:SystemRoot = $oldRoot
+
 Write-Host 'Логіка каналів журналів (wevtutil підмінено)'
 $global:Chan = @{
     'Security'    = @{ Name = 'Security'; Exists = $true; Enabled = $true; MaxBytes = 20MB; Mode = 'Circular' }
@@ -208,6 +225,16 @@ $global:Calls = @(); $Script:Counts = @{ OK = 0; Changed = 0; WouldChange = 0; W
 Invoke-Channels $s2 'Server' @{ SystemDriveFreeMB = 100000 }
 Assert (@($global:Calls | Where-Object { $_[0] -eq 'wevtutil.exe' }).Count -eq 0 -and $Script:Counts.WouldChange -eq 1) 'AuditOnly нічого не викликає'
 $global:AuditOnly = $false
+
+# журнал, ключ якого захищений ACL служби (ADWS на DC): wevtutil код 5 -> Warning, не Error
+$global:Chan['Microsoft-Windows-DNS-Client/Operational'] = @{ Name = 'x'; Exists = $true; Enabled = $true; MaxBytes = 1MB; Mode = 'Circular' }
+$realNative = (Get-Item function:global:Invoke-Native).ScriptBlock
+function global:Invoke-Native { param([string]$FilePath, [string[]]$Arguments) if ($Arguments[1] -eq 'Microsoft-Windows-DNS-Client/Operational') { return @{ Code = 5; Output = 'Access is denied.' } }; & $realNative $FilePath $Arguments }
+$Script:Report = @(); $Script:Counts = @{ OK = 0; Changed = 0; WouldChange = 0; Warning = 0; Error = 0; Skipped = 0 }
+Invoke-Channels $s2 'Server' @{ SystemDriveFreeMB = 100000 }
+$dr = @($Script:Report | Where-Object { $_.Item -eq 'Microsoft-Windows-DNS-Client/Operational' })[0]
+Assert ($dr.Status -eq 'Warning' -and $dr.Message -match 'немає доступу' -and $Script:Counts.Error -eq 0) 'відмова в доступі до журналу - попередження, не помилка'
+Set-Item function:global:Invoke-Native -Value $realNative
 
 Write-Host 'Sysmon для старих ОС з репозиторію (vendor)'
 foreach ($lv in '10.42', '10.2') {
@@ -415,6 +442,35 @@ foreach ($rd in 'README.md', 'README.uk.md') {
     $txt = [IO.File]::ReadAllText((Join-Path $root $rd))
     $urls = @([regex]::Matches($txt, 'raw\.githubusercontent\.com/egwyl666/sec_journal_on/([^/]+)/(windows/Start-SecLogging\.ps1|linux/install\.sh)') | ForEach-Object { $_.Groups[1].Value })
     Assert ($urls.Count -ge 4 -and @($urls | Where-Object { $_ -ne $rel }).Count -eq 0) "${rd}: однорядкові команди вказують на $rel [$($urls | Sort-Object -Unique)]"
+}
+
+Write-Host 'Закріплені хеші пакета, вивід утиліт'
+Import-ScriptFunctions $installer
+$pinsD = Join-Path ([IO.Path]::GetTempPath()) ('pins-' + [guid]::NewGuid())
+$srcP = Join-Path $pinsD 'src'; $pkgP = Join-Path $pinsD 'pkg'
+New-Item -ItemType Directory -Path $srcP, $pkgP -Force | Out-Null
+Copy-Item -LiteralPath $main -Destination $srcP
+$ph = Get-PinnedHashes (Join-Path $srcP 'Set-SecurityLogging.ps1')
+Assert ($ph.ConfigSha256 -eq $s.Pins.ConfigSha256 -and $ph.ContainsKey('Legacy1042ConfigSha256') -and -not $ph.ContainsKey('SysmonZipSha256')) "хеші читаються зі скрипта ($($ph.Keys.Count) шт.), порожні пропускаються"
+$ini = @($ph.Keys | ForEach-Object { '{0}={1}' -f $_, $ph[$_].ToUpper() }) + 'SysmonZipSha256=abc'
+[IO.File]::WriteAllLines((Join-Path $pkgP 'sources.ini'), [string[]]$ini)
+Assert (@(Test-PackagePins $srcP $pkgP).Count -eq 0) 'пакет із тими самими хешами не перезбирається (регістр не важить)'
+$ini2 = $ini | ForEach-Object { if ($_ -like 'ConfigSha256=*') { 'ConfigSha256=' + ('0' * 64) } else { $_ } }
+[IO.File]::WriteAllLines((Join-Path $pkgP 'sources.ini'), [string[]]$ini2)
+$d = @(Test-PackagePins $srcP $pkgP)
+Assert ($d.Count -eq 1 -and $d[0] -eq 'ConfigSha256') 'змінений конфіг Sysmon у новому релізі - пакет перезбирається'
+Remove-Item -LiteralPath (Join-Path $pkgP 'sources.ini')
+Assert (@(Test-PackagePins $srcP $pkgP).Count -eq $ph.Keys.Count) 'пакет без sources.ini - перезбирається'
+Remove-Item -LiteralPath $pinsD -Recurse -Force
+
+Import-ScriptFunctions $main
+$ru = [char[]](0x041d,0x0435,0x0020,0x0443,0x0434,0x0430,0x043b,0x043e,0x0441,0x044c) -join ''
+$broken = [Text.Encoding]::GetEncoding(866).GetString([Text.Encoding]::GetEncoding(1251).GetBytes($ru))
+Assert ($broken -match '[─-◿]') 'приклад кракозябр містить псевдографіку'
+Assert ((Repair-NativeText 'Access is denied.') -eq 'Access is denied.') 'звичайний текст не змінюється'
+Assert ((Repair-NativeText '') -eq '') 'порожній вивід не змінюється'
+if ([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage -ne [Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage) {
+    Assert ((Repair-NativeText $broken) -ne $broken) 'ANSI-вивід, прочитаний як OEM, перекодовується'
 }
 
 Write-Host ''

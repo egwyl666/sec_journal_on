@@ -189,7 +189,7 @@ function Write-Host {
 
 #endregion
 
-$ScriptVersion = '1.3.0'
+$ScriptVersion = '1.3.1'
 $ScriptPath = $MyInvocation.MyCommand.Path
 $ScriptDir = Split-Path -Parent $ScriptPath
 $StateRegPath = 'SOFTWARE\SecLogging'
@@ -499,7 +499,24 @@ function Invoke-Native {
     # stderr зовнішніх утиліт не повинен ставати фатальною помилкою при ErrorActionPreference=Stop
     $ErrorActionPreference = 'Continue'
     $out = & $FilePath @Arguments 2>&1 | ForEach-Object { [string]$_ }
-    @{ Code = $LASTEXITCODE; Output = (($out | Where-Object { $_ -ne '' }) -join "`n") }
+    @{ Code = $LASTEXITCODE; Output = (Repair-NativeText (($out | Where-Object { $_ -ne '' }) -join "`n")) }
+}
+
+function Repair-NativeText {
+    # Деякі утиліти (wevtutil) пишуть повідомлення в ANSI-кодуванні (1251), а PowerShell читає вивід як OEM (866):
+    # виходить "═х єфрыюё№". Символи псевдографіки (U+2500-U+25FF) у звичайних повідомленнях не трапляються -
+    # за ними впізнаємо таку підміну й перекодовуємо назад.
+    param([string]$Text)
+    if (-not $Text -or $Text -notmatch '[\u2500-\u25FF]') { return $Text }
+    try {
+        $oem = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+        $ansi = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage)
+        if ($oem.CodePage -eq $ansi.CodePage) { return $Text }
+        $fixed = $ansi.GetString($oem.GetBytes($Text))
+        if ($fixed -notmatch '[\u2500-\u25FF]') { return $fixed }
+    }
+    catch { Write-Verbose "Repair-NativeText: $($_.Exception.Message)" }
+    $Text
 }
 
 function Save-Download {
@@ -521,6 +538,9 @@ function Expand-ZipFile {
     param([string]$ZipPath, [string]$Destination)
     if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force }
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    # повні шляхи: і ZipFile, і Shell.Application рахують відносні від поточної теки процесу, а не від $PWD
+    $ZipPath = (Resolve-Path -LiteralPath $ZipPath).ProviderPath
+    $Destination = (Resolve-Path -LiteralPath $Destination).ProviderPath
     try {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
@@ -718,6 +738,11 @@ function Invoke-Channels {
             $status = 'Changed'; if ($notes.Count) { $status = 'Warning' }
             Add-Result 'EventLog' $name $status ((@("$before -> $afterText") + $notes) -join '; ') $before $afterText
         }
+        elseif ($r.Code -eq 5) {
+            # ACCESS_DENIED: ключ журналу захищений ACL служби (напр. "Active Directory Web Services" на DC) -
+            # адміністратор не має права його змінити; решта налаштувань від цього не залежить
+            Add-Result 'EventLog' $name 'Warning' ("немає доступу до налаштувань журналу (ACL служби), лишається: {0}" -f $afterText) $before $afterText
+        }
         else {
             Add-Result 'EventLog' $name 'Error' ("wevtutil код {0}: {1}; зараз: {2}" -f $r.Code, $r.Output, $afterText) $before $afterText
         }
@@ -801,6 +826,11 @@ function Invoke-AuditPolicy {
         if (($now -band $a.Pending) -eq $a.Pending) {
             $status = 'Changed'; $msg = '{0} -> {1}' -f (Format-AuditValue $was), (Format-AuditValue $now)
             if ($gpo.ContainsKey($guid) -and (($gpo[$guid] -bor $a.Pending) -ne $gpo[$guid])) { $status = 'Warning'; $msg += '; GPO це перезапише - оновіть GPO' }
+            elseif ($gpo.Count -and -not $gpo.ContainsKey($guid)) {
+                # коли аудит надходить із GPO, Windows при оновленні політик замінює ВСЮ локальну політику аудиту
+                # вмістом GPO: підкатегорії, яких немає в GPO, повертаються до "Без аудиту" (на DC - за кілька хвилин)
+                $status = 'Warning'; $msg += '; тимчасово: доменна GPO аудиту скине це при оновленні політик - потрібна GPO (на DC її створює Start-SecLogging)'
+            }
             Add-Result 'AuditPolicy' $a.Name $status $msg (Format-AuditValue $was) (Format-AuditValue $now)
         }
         else { Add-Result 'AuditPolicy' $a.Name 'Error' ('не застосовано, зараз {0}' -f (Format-AuditValue $now)) (Format-AuditValue $was) (Format-AuditValue $now) }
@@ -1431,7 +1461,13 @@ if ($Snapshot) {
 }
 
 $mutex = New-Object System.Threading.Mutex($false, 'Global\SecLoggingRun')
-if (-not $mutex.WaitOne(0)) { Write-Host 'Інший запуск Set-SecurityLogging уже виконується, вихід.'; exit 0 }
+$acquired = $false
+try { $acquired = $mutex.WaitOne(0) }
+catch {
+    # попередній запуск завершився аварійно, не звільнивши м'ютекс: .NET віддає його нам, кидаючи AbandonedMutexException
+    if ($_.Exception.GetBaseException() -is [System.Threading.AbandonedMutexException]) { $acquired = $true } else { throw }
+}
+if (-not $acquired) { Write-Host 'Інший запуск Set-SecurityLogging уже виконується, вихід.'; exit 0 }
 
 try {
     if (-not (Test-Path -LiteralPath $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
