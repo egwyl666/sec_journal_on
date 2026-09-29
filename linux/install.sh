@@ -8,7 +8,8 @@
 # Команди:
 #   install (за замовчуванням)  налаштувати цей хост (онлайн або з комплекту --from)
 #   build                       зібрати офлайн-комплект для хостів без інтернету
-#                               (той самий дистрибутив, версія та архітектура, що й тут)
+#                               (той самий дистрибутив, версія та архітектура, що й тут;
+#                               сімейства deb і rpm: Ubuntu/Debian/Mint/Astra, RHEL/CentOS/Rocky/Alma/Oracle/Fedora/Amazon)
 # Параметри:
 #   --from DIR       install: взяти комплект з DIR (перевіряється SHA256SUMS)
 #   --out DIR        build: тека комплекту (типово ./seclogging-bundle-<os>-<версія>-<arch>)
@@ -68,10 +69,17 @@ HOST_VER=$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")
 HOST_ARCH=$(uname -m)
 FAMILY="unknown"
 case " $HOST_ID $HOST_LIKE " in
+    *" altlinux "*) FAMILY="alt" ;;
     *" debian "*|*" ubuntu "*) FAMILY="deb" ;;
-    *" rhel "*|*" fedora "*|*" centos "*) FAMILY="rpm" ;;
+    *" rhel "*|*" fedora "*|*" centos "*|*" amzn "*) FAMILY="rpm" ;;
     *" suse "*|*" sles "*|*" opensuse "*) FAMILY="suse" ;;
+    *" arch "*|*" archlinux "*) FAMILY="arch" ;;
+    *" alpine "*) FAMILY="alpine" ;;
 esac
+if [ "$FAMILY" = "unknown" ]; then
+    if have apt-get && have dpkg; then FAMILY="deb"; elif have dnf || have yum; then FAMILY="rpm"
+    elif have zypper; then FAMILY="suse"; elif have pacman; then FAMILY="arch"; elif have apk; then FAMILY="alpine"; fi
+fi
 
 download() { # download URL FILE
     if have curl; then curl -fsSL -o "$2" "$1"; elif have wget; then wget -q -O "$2" "$1"; else return 1; fi
@@ -129,9 +137,19 @@ pkg_download() { # pkg_download DIR PACKAGE... - пакети разом з ус
             # shellcheck disable=SC2086
             (cd "$dir" && apt-get -o APT::Sandbox::User=root download $all >/dev/null) ;;
         rpm)
-            if have dnf; then dnf download -q --resolve --alldeps --destdir "$dir" "$@" >/dev/null
-            elif have yumdownloader; then yumdownloader -q --resolve --destdir "$dir" "$@" >/dev/null
-            else return 1; fi ;;
+            if have dnf; then
+                # dnf5 (Fedora 41+) не має -q у download; плагін download потрібен у dnf4
+                dnf download --resolve --alldeps --destdir "$dir" "$@" >/dev/null 2>&1 \
+                    || { dnf install -y -q 'dnf-command(download)' >/dev/null 2>&1 && dnf download --resolve --alldeps --destdir "$dir" "$@" >/dev/null 2>&1; }
+            else
+                # yum (CentOS 7): repotrack завантажує повне дерево залежностей, yumdownloader - лише відсутні тут
+                have repotrack || yum install -y -q yum-utils >/dev/null 2>&1
+                if have repotrack; then repotrack -a "$(uname -m)" -p "$dir" "$@" >/dev/null 2>&1
+                elif have yumdownloader; then yumdownloader -q --resolve --destdir "$dir" "$@" >/dev/null
+                else return 1; fi
+                find "$dir" -name '*.i686.rpm' -delete 2>/dev/null
+            fi
+            ls "$dir"/*.rpm >/dev/null 2>&1 ;;
         *) return 1 ;;
     esac
 }
@@ -143,7 +161,8 @@ write_sums() { # write_sums DIR -> DIR/SHA256SUMS для всіх файлів (
 }
 
 do_build() {
-    [ "$FAMILY" = "deb" ] || [ "$FAMILY" = "rpm" ] || die "build підтримує лише deb/rpm (зараз: $HOST_ID)"
+    [ "$FAMILY" = "deb" ] || [ "$FAMILY" = "rpm" ] \
+        || die "офлайн-комплект підтримує сімейства deb і rpm (цей хост: $HOST_ID, сімейство $FAMILY). Онлайн-встановлення працює: sudo ./install.sh"
     [ -n "$OUT" ] || OUT="$PWD/seclogging-bundle-$HOST_ID-$HOST_VER-$HOST_ARCH"
     mkdir -p "$OUT" || die "не вдалося створити $OUT"
     OUT=$(cd "$OUT" && pwd)
@@ -202,20 +221,28 @@ install_offline_pkgs() { # install_offline_pkgs DIR - ставить лише в
             done
             return 1 ;;
         rpm)
+            # відсутні пакети встановлюються, старіші - оновлюються, новіші на хості не чіпаються (без відкату)
+            local upd=()
             for f in "$dir"/*.rpm; do
                 [ -f "$f" ] || continue
                 pkg=$(rpm -qp --qf '%{NAME}' "$f" 2>/dev/null)
-                rpm -q "$pkg" >/dev/null 2>&1 && continue
-                list+=("$f")
+                if rpm -q "$pkg" >/dev/null 2>&1; then
+                    # "rpm -U --test --nodeps" без помилки = файл новіший за встановлений (залежності - з комплекту)
+                    rpm -U --test --nodeps "$f" >/dev/null 2>&1 && upd+=("$f")
+                else
+                    list+=("$f")
+                fi
             done
+            list+=(${upd[@]+"${upd[@]}"})
             [ ${#list[@]} -eq 0 ] && return 0
+            # одна транзакція: rpm сам впорядковує залежності
             rpm -Uvh "${list[@]}" >> /tmp/seclogging-offline.log 2>&1 ;;
         *) return 1 ;;
     esac
 }
 
 do_install() {
-    local main args=("${PASS[@]}")
+    local main args=(${PASS[@]+"${PASS[@]}"})
     if [ -n "$FROM" ]; then
         FROM=$(cd "$FROM" 2>/dev/null && pwd) || die "теку комплекту не знайдено"
         info "Перевірка комплекту $FROM"
@@ -249,8 +276,8 @@ do_install() {
         main=$(get_main_script) || die "не вдалося отримати set-security-logging.sh (перевірте інтернет або використайте --from)"
         [ "$WITH_SYSMON" -eq 1 ] && args+=(--with-sysmon)
     fi
-    info "Запуск $main ${args[*]}"
-    bash "$main" "${args[@]}"
+    info "Запуск $main ${args[*]:-}"
+    bash "$main" ${args[@]+"${args[@]}"}
 }
 
 case "$CMD" in

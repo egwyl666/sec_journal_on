@@ -15,7 +15,7 @@
 windows/Set-SecurityLogging.ps1   єдиний скрипт для будь-якої Windows (WS / Server / DC), PowerShell 2.0+
 windows/New-SecLoggingGpo.ps1     надбудова GPO для домену (запускати на DC)
 windows/Install-SecLogging.ps1    автоматизація: завантажити -> зібрати пакет -> встановити / шара / GPO
-linux/set-security-logging.sh     єдиний скрипт для Linux (Debian/Ubuntu, RHEL/Rocky/Alma, SUSE)
+linux/set-security-logging.sh     єдиний скрипт для будь-якого Linux (сімейства deb, rpm, SUSE, Arch, Alpine; див. таблицю)
 linux/install.sh                  автоматизація: офлайн-комплект (build) і встановлення (онлайн або --from)
 vendor/sysmon/10.42, 10.2/        Sysmon для Windows 7 / 2008 / 2008 R2 (перевірено, хеш закріплено)
 vendor/sysmon-config/             конфіги SwiftOnSecurity для цих версій (CC BY 4.0, хеш закріплено)
@@ -282,15 +282,32 @@ sudo ./linux/set-security-logging.sh --with-sysmon --configure-wazuh
 
 | Що | Як |
 |---|---|
-| Визначення | `/etc/os-release` дає сімейство deb/rpm/suse. `graphical.target` означає робочу станцію, інакше — сервер. Також перевіряється, чи це контейнер, і вільне місце на `/var` |
+| Визначення | `/etc/os-release` (`ID`, потім `ID_LIKE`, тому похідні дистрибутиви теж розпізнаються), інакше — за наявним пакетним менеджером. Також визначає систему ініціалізації (systemd / OpenRC / SysV), контейнер і вільне місце на `/var`. `graphical.target` означає робочу станцію, інакше — сервер |
 | auditd | встановлює пакет. `auditd.conf`: `max_log_file` 50/100 МБ × `num_logs` 10, `ROTATE`, `ENRICHED` (auditd ≥ 2.6) |
 | Правила | `/etc/audit/rules.d/50-seclogging.rules`: облікові записи, sudoers, PAM, SSH, cron/at/systemd/rc/profile, ld.so.preload, модулі ядра, hostname, час, ptrace-ін'єкції, монтування, execve у сесіях користувачів (ключ `audit-wazuh-c` під стандартні правила Wazuh), execve від облікових записів веб-сервера (`webshell`). Рядки `-w` пишуться, лише якщо шлях існує. Якщо ввімкнено незмінний режим (`-e 2`), скрипт попереджає, що потрібне перезавантаження. `--immutable` сам додає `-e 2` |
 | journald | `Storage=persistent`, `SystemMaxUse` 1G (WS) / 2G (сервер) через drop-in, лише збільшення |
-| Auth-лог | перевіряє rsyslog і `/var/log/auth.log` / `/var/log/secure`, а також що logrotate зберігає не менше 7 днів |
+| Auth-лог | перевіряє rsyslog і фактичний auth-лог (`/var/log/auth.log`, `/var/log/secure`, інакше типовий для сімейства), а також що logrotate зберігає не менше 7 днів |
 | Sysmon for Linux | `--with-sysmon`: встановлення з packages.microsoft.com (підписано GPG) або офлайн через `--sysmon-package-dir DIR` (потрібен файл `SHA256SUMS`). Вбудований конфіг: процеси, мережа без loopback, створення файлів у місцях закріплення |
 | Wazuh | перевіряє агента і збір audit/auth-журналів. З `--configure-wazuh` дописує керований блок в `ossec.conf` |
 
 Звіт — у `/var/log/seclogging/last-report.json`, підсумковий рядок іде в syslog (тег `seclogging`).
+
+### Підтримувані дистрибутиви
+
+Один скрипт для всіх: він сам визначає, що це за хост, і вибирає пакетний менеджер, назви пакетів, шляхи журналів і команди служб. Про дистрибутив нічого вказувати не треба.
+
+| Сімейство | Дистрибутиви | Пакетний менеджер | Офлайн-комплект (`install.sh build`) | Sysmon for Linux |
+|---|---|---|---|---|
+| deb | Ubuntu, Debian, Mint, Astra, Pop!_OS, Kali та інші похідні | apt | так | Ubuntu 18.04+, Debian 10+, похідні — за базовим |
+| rpm | RHEL, CentOS 7/8/Stream, Rocky, Alma, Oracle, Fedora, Amazon Linux | dnf / yum | так | RHEL-сумісні 7+ і Fedora (ядро ≥ 4.15, тож не CentOS 7) |
+| suse | SLES, openSUSE Leap/Tumbleweed | zypper | ні (лише онлайн) | SLES / Leap 15 |
+| arch | Arch, Manjaro, EndeavourOS | pacman | ні (лише онлайн) | ні |
+| alpine | Alpine (OpenRC, потрібен `apk add bash`) | apk | ні (лише онлайн) | ні |
+| інші | будь-що з `/etc/os-release` | немає | ні | ні |
+
+На невідомому дистрибутиві auditd має бути вже встановлений. Тоді скрипт налаштує все інше, а замість встановлення пакетів покаже попередження.
+
+CentOS 7 і 8 більше не підтримуються: їхні типові репозиторії не працюють. Скрипт про це повідомляє і пропонує `vault.centos.org` або офлайн-комплект.
 
 **Чи є сенс у Sysmon for Linux?** Помірний. Основою залишається auditd. Sysmon додає мережеві з'єднання з прив'язкою до процесу (через auditd це шумно й незручно) та спільну з Windows схему подій. Мінуси:
 - потрібен eBPF (ядро ≥ 4.15);
@@ -334,20 +351,23 @@ done
 |---|---|---|
 | Синтаксис обох `.ps1`, PSScriptAnalyzer (Warning/Error) | pwsh 7 на Linux | чисто |
 | PowerShell 2.0: немає конструкцій PS3+ | grep + PSUseCompatibleSyntax | чисто |
-| Юніт-тести `tests/windows-unit.ps1`: налаштування, розбір auditpol з локалізованими назвами, JSON, планування розмірів, перевірка хешів, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логіка аудиту й журналів на підмінених auditpol/wevtutil, повторний запуск нічого не змінює | pwsh 7 | 81/81 |
-| `tests/linux-docker.sh`: check → apply → повторний apply без змін | Ubuntu 24.04 і 20.04 зі справжнім auditd; Debian 12 і Rocky 9 із заглушкою auditctl (дзеркала пакетів були недоступні з пісочниці) | успішно |
+| Юніт-тести `tests/windows-unit.ps1`: налаштування, розбір auditpol з локалізованими назвами, JSON, планування розмірів, перевірка хешів, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логіка аудиту й журналів на підмінених auditpol/wevtutil, повторний запуск нічого не змінює, запасні шляхи PowerShell 2.0 | pwsh 7 | 90/90 |
+| `tests/linux-docker.sh`: check → apply → повторний apply без змін | Ubuntu 24.04 / 20.04, Mint 21.3, Oracle Linux 9 зі справжнім auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch із заглушкою auditctl (їхні дзеркала були недоступні з пісочниці) | успішно (13 дистрибутивів) |
+| Встановлення auditd самим скриптом через пакетний менеджер | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | успішно |
+| Стенд Server 2008 R2: Sysmon 10.42 з конфігом схеми 4.22 | VM, PowerShell 2.0 | працює, події пишуться |
 | Завантаження згенерованих правил auditd у справжнє ядро | privileged-контейнер | прийнято 57/57 правил |
 | Встановлення sysmonforlinux з packages.microsoft.com | Ubuntu 22.04 | встановлюється (1.5.3) |
-| `tests/linux-bundle.sh`: `install.sh build` → встановлення з комплекту на чистий контейнер **без мережі** → повторний запуск без змін → змінений комплект відхилено | Ubuntu 22.04 (із Sysmon), Ubuntu 24.04 | успішно |
+| `tests/linux-bundle.sh`: `install.sh build` → встановлення з комплекту на чистий контейнер **без мережі** → повторний запуск без змін → змінений комплект відхилено | Ubuntu 22.04 (із Sysmon), Ubuntu 24.04, Oracle Linux 9 (rpm) | успішно |
 | `install.sh --fetch` завантажує основний скрипт з GitHub | Ubuntu 24.04 | успішно |
 | Sysmon 10.42 і 10.2 у `vendor/`: Authenticode (Microsoft, дійсний на момент мітки часу), FileVersion, закріплений хеш | osslsigncode + юніт-тест | успішно |
 
 **Ще не перевірено (потрібен реальний стенд):**
 - увесь Windows-код, що звертається до ОС: wevtutil, auditpol, встановлення Sysmon, реєстр, DISM;
 - `New-SecLoggingGpo.ps1` на справжньому AD/SYSVOL;
-- робота на Server 2008/R2, зокрема Sysmon 10.42/10.2 там (див. стендову перевірку вище);
+- довготривала стабільність Sysmon 10.42/10.2 на Server 2008/R2 (встановлення перевірено; запустіть `-CollectOnly` через кілька годин і після перезавантаження);
 - `Install-SecLogging.ps1` на справжній Windows (юніт-тестами покрито лише його допоміжні функції);
-- `linux/install.sh build` на сімействі RHEL (дзеркала пакетів були недоступні з пісочниці);
+- Alpine (дзеркала недоступні з пісочниці) і встановлення пакетів на SUSE, Arch, Amazon Linux, CentOS 7;
+- `install.sh build` на CentOS 7 (`repotrack`);
 - Sysmon for Linux на хості з systemd (у контейнері sysmon приймає будь-який конфіг без перевірки).
 
 Рекомендований порядок:
@@ -359,5 +379,6 @@ done
 ```bash
 pwsh -NoProfile -File tests/windows-unit.ps1
 ./tests/linux-docker.sh          # IMAGES="ubuntu:24.04 debian:12" щоб вибрати образи
-./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 WITH_SYSMON=1
+./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 WITH_SYSMON=1 або IMAGE=oraclelinux:9
+# за проксі лише з HTTPS: CA_FILE=/path/ca.crt PROXY=$HTTPS_PROXY ./tests/linux-docker.sh
 ```

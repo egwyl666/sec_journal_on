@@ -20,7 +20,7 @@
 set -u
 umask 027
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 CHECK=0
 PROFILE="auto"
 WITH_SYSMON=0
@@ -87,6 +87,15 @@ result() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# ver_ge A B: A >= B (числові частини через крапку; без sort -V - його немає в busybox)
+ver_ge() {
+    awk -v a="$1" -v b="$2" 'BEGIN{na=split(a,x,/[^0-9]+/); nb=split(b,y,/[^0-9]+/); n=(na>nb?na:nb)
+        for(i=1;i<=n;i++){ if((x[i]+0)>(y[i]+0)) exit 0; if((x[i]+0)<(y[i]+0)) exit 1 } exit 0}'
+}
+
+# імʼя хоста: утиліти hostname немає в мінімальних образах (Fedora, Amazon Linux, openSUSE, Arch)
+host_name() { cat /proc/sys/kernel/hostname 2>/dev/null || uname -n; }
+
 # рядок розміру (100M, 1G, 512K, байти) -> МБ
 to_mb() {
     local v="${1:-}" n u
@@ -103,21 +112,38 @@ backup_once() { [ -f "$1" ] && [ ! -f "$1.seclogging.bak" ] && cp -p "$1" "$1.se
 
 # ------------------------------------------------------------------ визначення хоста
 
-OS_ID=""; OS_LIKE=""; OS_VER=""; OS_NAME=""; FAMILY="unknown"; PKG=""
-HAS_SYSTEMD=0; IN_CONTAINER=0; ROLE=""; ARCH=$(uname -m); KERNEL=$(uname -r)
+OS_ID=""; OS_LIKE=""; OS_VER=""; OS_NAME=""; OS_CODENAME=""; FAMILY="unknown"; PKG=""
+HAS_SYSTEMD=0; HAS_OPENRC=0; IN_CONTAINER=0; ROLE=""; ARCH=$(uname -m); KERNEL=$(uname -r)
 
 detect_host() {
     if [ -r /etc/os-release ]; then
         # shellcheck disable=SC1091
         . /etc/os-release
         OS_ID="${ID:-}"; OS_LIKE="${ID_LIKE:-}"; OS_VER="${VERSION_ID:-}"; OS_NAME="${PRETTY_NAME:-$OS_ID}"
+        OS_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+    elif [ -r /etc/redhat-release ]; then
+        OS_ID="rhel"; OS_NAME=$(head -1 /etc/redhat-release); OS_VER=$(grep -oE '[0-9]+(\.[0-9]+)?' /etc/redhat-release | head -1)
     fi
+    # 1) за os-release (ID, потім ID_LIKE - так покриваються похідні: Mint, Astra, Rocky, Oracle, Amazon, ...)
     case " $OS_ID $OS_LIKE " in
+        *" altlinux "*) FAMILY="alt"; PKG="apt" ;;                     # ALT: apt-rpm
         *" debian "*|*" ubuntu "*) FAMILY="deb"; PKG="apt" ;;
-        *" rhel "*|*" fedora "*|*" centos "*) FAMILY="rpm"; if have dnf; then PKG="dnf"; else PKG="yum"; fi ;;
+        *" rhel "*|*" fedora "*|*" centos "*|*" amzn "*) FAMILY="rpm" ;;
         *" suse "*|*" sles "*|*" opensuse "*) FAMILY="suse"; PKG="zypper" ;;
+        *" arch "*|*" archlinux "*) FAMILY="arch"; PKG="pacman" ;;
+        *" alpine "*) FAMILY="alpine"; PKG="apk" ;;
     esac
+    # 2) невідомий дистрибутив: за наявним пакетним менеджером
+    if [ "$FAMILY" = "unknown" ]; then
+        if have apt-get && have dpkg; then FAMILY="deb"; PKG="apt"
+        elif have dnf || have yum; then FAMILY="rpm"
+        elif have zypper; then FAMILY="suse"; PKG="zypper"
+        elif have pacman; then FAMILY="arch"; PKG="pacman"
+        elif have apk; then FAMILY="alpine"; PKG="apk"; fi
+    fi
+    if [ "$FAMILY" = "rpm" ]; then if have dnf; then PKG="dnf"; else PKG="yum"; fi; fi
     [ -d /run/systemd/system ] && HAS_SYSTEMD=1
+    [ "$HAS_SYSTEMD" -eq 0 ] && have rc-service && HAS_OPENRC=1
     if have systemd-detect-virt && systemd-detect-virt -cq 2>/dev/null; then IN_CONTAINER=1
     elif [ -f /.dockerenv ] || [ -f /run/.containerenv ] || grep -qaE '(docker|lxc|kubepods|containerd)' /proc/1/cgroup 2>/dev/null; then IN_CONTAINER=1; fi
 
@@ -128,6 +154,8 @@ detect_host() {
         ROLE="$PROFILE"
     fi
 }
+
+init_name() { if [ "$HAS_SYSTEMD" -eq 1 ]; then echo systemd; elif [ "$HAS_OPENRC" -eq 1 ]; then echo openrc; else echo sysv; fi; }
 
 # Значення профілю (МБ / кількість)
 set_profile() {
@@ -155,21 +183,52 @@ pkg_install() {
         dnf) dnf install -y -q "$@" >/tmp/seclogging-pkg.log 2>&1 ;;
         yum) yum install -y -q "$@" >/tmp/seclogging-pkg.log 2>&1 ;;
         zypper) zypper --non-interactive install "$@" >/tmp/seclogging-pkg.log 2>&1 ;;
-        *) return 1 ;;
+        pacman) pacman -S --noconfirm --needed "$@" >/tmp/seclogging-pkg.log 2>&1 ;;
+        apk) apk add --no-progress "$@" >/tmp/seclogging-pkg.log 2>&1 ;;
+        *) echo "невідомий пакетний менеджер" >/tmp/seclogging-pkg.log; return 1 ;;
     esac
 }
+
+# Підказка до помилки встановлення: репозиторії дистрибутивів, що вийшли з підтримки
+pkg_hint() {
+    case "$OS_ID:${OS_VER%%.*}" in
+        centos:7|centos:8) echo " - репозиторії CentOS ${OS_VER%%.*} перенесено на vault.centos.org (виправте /etc/yum.repos.d або використайте офлайн-комплект install.sh)" ;;
+        *) grep -qiE 'Could not resolve|Failed to (download|fetch)|Cannot find a valid baseurl|Temporary failure' /tmp/seclogging-pkg.log 2>/dev/null \
+               && echo " - немає доступу до репозиторіїв (без інтернету використайте офлайн-комплект install.sh)" ;;
+    esac
+}
+
+# назва пакета auditd у сімействі
+audit_pkg_name() { case "$FAMILY" in deb) echo auditd ;; *) echo audit ;; esac; }
 
 svc_restart() {
     # RHEL відмовляє в "systemctl restart auditd"; обгортка service працює всюди.
     local s="$1"
+    if [ "$HAS_OPENRC" -eq 1 ]; then rc-service "$s" restart >/dev/null 2>&1; return $?; fi
     if have service; then service "$s" restart >/dev/null 2>&1 && return 0; fi
     if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl restart "$s" >/dev/null 2>&1 && return 0; fi
     [ -x "/etc/init.d/$s" ] && "/etc/init.d/$s" restart >/dev/null 2>&1
 }
 
+svc_start() {
+    local s="$1"
+    if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl start "$s" >/dev/null 2>&1; return $?; fi
+    if [ "$HAS_OPENRC" -eq 1 ]; then rc-service "$s" start >/dev/null 2>&1; return $?; fi
+    svc_restart "$s"
+}
+
+svc_enable() {
+    local s="$1"
+    if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl enable "$s" >/dev/null 2>&1
+    elif [ "$HAS_OPENRC" -eq 1 ]; then rc-update add "$s" default >/dev/null 2>&1
+    elif have chkconfig; then chkconfig "$s" on >/dev/null 2>&1
+    elif have update-rc.d; then update-rc.d "$s" enable >/dev/null 2>&1; fi
+}
+
 svc_active() {
     local s="$1"
     if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl is-active --quiet "$s"; return $?; fi
+    if [ "$HAS_OPENRC" -eq 1 ]; then rc-service "$s" status >/dev/null 2>&1; return $?; fi
     have service && service "$s" status >/dev/null 2>&1
 }
 
@@ -310,16 +369,16 @@ audit_version_ge() {
     # auditctl -v на старих версіях потребує CAP_AUDIT_CONTROL: беремо версію пакета
     local cur; cur=$( { auditctl -v 2>/dev/null; dpkg-query -W -f='${Version}\n' auditd 2>/dev/null; rpm -q --qf '%{VERSION}\n' audit 2>/dev/null; } \
         | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
-    [ -n "$cur" ] && [ "$(printf '%s\n%s\n' "$1" "$cur" | sort -V | head -1)" = "$1" ]
+    [ -n "$cur" ] && ver_ge "$cur" "$1"
 }
 
 do_auditd() {
     if ! have auditctl; then
         if [ "$CHECK" -eq 1 ]; then result auditd package WouldChange "встановити auditd"; return
         fi
-        local pkgname="audit"; [ "$FAMILY" = "deb" ] && pkgname="auditd"
-        if pkg_install "$pkgname"; then result auditd package Changed "встановлено $pkgname"
-        else result auditd package Error "не вдалося встановити $pkgname (див. /tmp/seclogging-pkg.log)"; return; fi
+        local pkgname; pkgname=$(audit_pkg_name)
+        if pkg_install "$pkgname" && have auditctl; then result auditd package Changed "встановлено $pkgname"
+        else result auditd package Error "не вдалося встановити $pkgname через ${PKG:-?} (див. /tmp/seclogging-pkg.log)$(pkg_hint)"; return; fi
     else
         result auditd package OK "$(auditctl -v 2>/dev/null | head -1 || true)"
     fi
@@ -391,9 +450,9 @@ do_auditd() {
         if svc_active auditd; then result auditd service OK "працює, enabled=$enabled"; else result auditd service WouldChange "запустити auditd"; fi
         return
     fi
-    if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl enable auditd >/dev/null 2>&1; fi
+    svc_enable auditd
     if ! svc_active auditd; then
-        if [ "$HAS_SYSTEMD" -eq 1 ]; then systemctl start auditd >/dev/null 2>&1; else svc_restart auditd; fi
+        svc_start auditd
         AUDITD_RESTART=0
     elif [ "${AUDITD_RESTART:-0}" -eq 1 ]; then
         svc_restart auditd || result auditd service Error "перезапуск не вдався"
@@ -405,7 +464,7 @@ do_auditd() {
             result auditd "завантаження правил" Warning "правила аудиту незмінні (-e 2): нові правила діятимуть після перезавантаження"
         else
             local out
-            if have augenrules; then out=$(augenrules --load 2>&1); else out=$(auditctl -R /etc/audit/audit.rules 2>&1); fi
+            if have augenrules; then out=$(augenrules --load 2>&1); else out=$(auditctl -R "$RULES_FILE" 2>&1); fi
             if auditctl -l 2>/dev/null | grep -q 'key=identity'; then
                 result auditd "завантаження правил" Changed "завантажено, активних правил: $(auditctl -l 2>/dev/null | grep -c .)"
             else
@@ -453,7 +512,10 @@ do_journald() {
 
 AUTH_LOG=""
 do_authlog() {
-    if [ "$FAMILY" = "deb" ]; then AUTH_LOG=/var/log/auth.log; else AUTH_LOG=/var/log/secure; fi
+    # де syslog пише автентифікацію: спершу фактичний файл, інакше типовий для сімейства
+    if [ -f /var/log/auth.log ]; then AUTH_LOG=/var/log/auth.log
+    elif [ -f /var/log/secure ]; then AUTH_LOG=/var/log/secure
+    else case "$FAMILY" in deb) AUTH_LOG=/var/log/auth.log ;; suse|arch|alpine) AUTH_LOG=/var/log/messages ;; *) AUTH_LOG=/var/log/secure ;; esac; fi
     if have rsyslogd || have syslog-ng; then
         if [ -f "$AUTH_LOG" ]; then result authlog "$AUTH_LOG" OK "присутній"
         else result authlog "$AUTH_LOG" Warning "syslog-демон встановлено, але $AUTH_LOG відсутній (служба зупинена?)"; fi
@@ -521,23 +583,37 @@ SYSMON_CONFIG_XML='<Sysmon schemaversion="4.70">
 </Sysmon>'
 
 kernel_ge() { # kernel_ge 4.15
-    local want="$1" cur; cur=$(printf '%s' "$KERNEL" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
-    [ "$(printf '%s\n%s\n' "$want" "$cur" | sort -V | head -1)" = "$want" ]
+    local cur; cur=$(printf '%s' "$KERNEL" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+    ver_ge "$cur" "$1"
 }
 
-sysmon_repo_url() {
-    local major="${OS_VER%%.*}"
-    case "$OS_ID" in
-        ubuntu) echo "https://packages.microsoft.com/config/ubuntu/$OS_VER/packages-microsoft-prod.deb" ;;
-        debian) echo "https://packages.microsoft.com/config/debian/$major/packages-microsoft-prod.deb" ;;
-        rhel|rocky|almalinux|centos|ol) echo "https://packages.microsoft.com/config/rhel/$major/packages-microsoft-prod.rpm" ;;
-        fedora) echo "https://packages.microsoft.com/config/fedora/$major/packages-microsoft-prod.rpm" ;;
-        sles|opensuse-leap) echo "https://packages.microsoft.com/config/sles/$major/packages-microsoft-prod.rpm" ;;
+# кодове імʼя Ubuntu -> версія (для похідних: Mint, Pop!_OS, elementary, Zorin ...)
+ubuntu_ver_by_codename() {
+    case "$1" in
+        bionic) echo 18.04 ;; focal) echo 20.04 ;; jammy) echo 22.04 ;; noble) echo 24.04 ;; plucky) echo 25.04 ;;
         *) echo "" ;;
     esac
 }
 
+sysmon_repo_url() {
+    local major="${OS_VER%%.*}" base="https://packages.microsoft.com/config" v
+    case "$OS_ID" in
+        ubuntu) echo "$base/ubuntu/$OS_VER/packages-microsoft-prod.deb"; return ;;
+        debian) echo "$base/debian/$major/packages-microsoft-prod.deb"; return ;;
+        rhel|rocky|almalinux|centos|ol) echo "$base/rhel/$major/packages-microsoft-prod.rpm"; return ;;
+        fedora) echo "$base/fedora/$major/packages-microsoft-prod.rpm"; return ;;
+        sles|opensuse-leap) echo "$base/sles/$major/packages-microsoft-prod.rpm"; return ;;
+    esac
+    # похідні дистрибутиви: за базовим
+    case " $OS_LIKE " in
+        *" ubuntu "*) v=$(ubuntu_ver_by_codename "$OS_CODENAME"); [ -n "$v" ] && echo "$base/ubuntu/$v/packages-microsoft-prod.deb" ;;
+        *" debian "*) v=$(cut -d. -f1 /etc/debian_version 2>/dev/null); case "$v" in ''|*[!0-9]*) ;; *) echo "$base/debian/$v/packages-microsoft-prod.deb" ;; esac ;;
+        *" rhel "*|*" centos "*) echo "$base/rhel/$major/packages-microsoft-prod.rpm" ;;
+    esac
+}
+
 install_sysmon_pkg() {
+    case "$FAMILY" in deb|rpm|suse) ;; *) echo "Sysmon for Linux не має пакетів для $OS_ID"; return 1 ;; esac
     if [ -n "$SYSMON_PKG_DIR" ]; then
         # офлайн: спершу перевіряємо SHA256SUMS
         [ -f "$SYSMON_PKG_DIR/SHA256SUMS" ] || { echo "SHA256SUMS відсутній у $SYSMON_PKG_DIR"; return 1; }
@@ -607,13 +683,13 @@ do_wazuh() {
     local conf=/var/ossec/etc/ossec.conf shared=/var/ossec/etc/shared/agent.conf
     if [ ! -f "$conf" ]; then result wazuh agent Warning "Агент Wazuh не встановлено - журнали залишаються лише локально"; return; fi
     local ver=""; [ -x /var/ossec/bin/wazuh-control ] && ver=$(/var/ossec/bin/wazuh-control info -v 2>/dev/null)
-    if svc_active wazuh-agent; then result wazuh agent OK "працює ${ver}"; else result wazuh agent Warning "встановлено ${ver}, але не працює"; fi
+    if svc_active wazuh-agent; then result wazuh agent OK "працює${ver:+ $ver}"; else result wazuh agent Warning "встановлено${ver:+ $ver}, але не працює"; fi
 
     # потрібні: "формат|розташування"
     local wanted=("audit|/var/log/audit/audit.log")
     if [ -n "$AUTH_LOG" ]; then wanted+=("syslog|$AUTH_LOG"); else wanted+=("journald|journald"); fi
     if [ "$WITH_SYSMON" -eq 1 ] && [ -n "$AUTH_LOG" ]; then
-        if [ "$FAMILY" = "deb" ]; then wanted+=("syslog|/var/log/syslog"); else wanted+=("syslog|/var/log/messages"); fi
+        if [ -f /var/log/syslog ] || { [ "$FAMILY" = "deb" ] && [ ! -f /var/log/messages ]; }; then wanted+=("syslog|/var/log/syslog"); else wanted+=("syslog|/var/log/messages"); fi
     fi
     local present missing=() w loc
     present=$(cat "$conf" "$shared" 2>/dev/null | grep -oE '<location>[^<]+</location>' | sed -E 's|</?location>||g')
@@ -637,7 +713,7 @@ do_wazuh() {
     {
         echo "$MARK_BEGIN"
         echo "<ossec_config>"
-        printf '%s\n' "${old[@]}" "${missing[@]}" | awk 'NF && !seen[$0]++' | while IFS='|' read -r fmt loc; do
+        printf '%s\n' ${old[@]+"${old[@]}"} "${missing[@]}" | awk 'NF && !seen[$0]++' | while IFS='|' read -r fmt loc; do
             printf '  <localfile>\n    <log_format>%s</log_format>\n    <location>%s</location>\n  </localfile>\n' "$fmt" "$loc"
         done
         echo "</ossec_config>"
@@ -657,11 +733,11 @@ main() {
     if [ "$QUIET" -eq 0 ]; then
         echo
         echo "set-security-logging $SCRIPT_VERSION  режим: $([ "$CHECK" -eq 1 ] && echo 'ЛИШЕ ПЕРЕВІРКА' || echo 'ЗАСТОСУВАННЯ')"
-        echo "$(hostname): $OS_NAME, сімейство=$FAMILY, роль=$ROLE, ядро=$KERNEL, $ARCH, systemd=$HAS_SYSTEMD, контейнер=$IN_CONTAINER"
+        echo "$(host_name): $OS_NAME, сімейство=$FAMILY, роль=$ROLE, ядро=$KERNEL, $ARCH, init=$(init_name), контейнер=$IN_CONTAINER"
         echo
     fi
-    result Host Роль OK "$ROLE (сімейство $FAMILY, пакетний менеджер ${PKG:-немає})"
-    [ "$FAMILY" = "unknown" ] && result Host Дистрибутив Warning "непідтримуваний дистрибутив '$OS_ID': встановлення пакетів пропускається"
+    result Host Роль OK "$ROLE (сімейство $FAMILY, пакетний менеджер ${PKG:-немає}, init $(init_name))"
+    [ "$FAMILY" = "unknown" ] && result Host Дистрибутив Warning "невідомий дистрибутив '${OS_ID:-?}' без відомого пакетного менеджера: відсутні пакети не встановлюються, решта налаштувань застосовується"
     set_profile
     AUDITD_RESTART=0; RULES_CHANGED=0
     do_auditd
@@ -678,7 +754,7 @@ main() {
         printf '{\n  "Tool": "set-security-logging", "Version": "%s", "Mode": "%s",\n' "$SCRIPT_VERSION" "$([ "$CHECK" -eq 1 ] && echo Check || echo Apply)"
         printf '  "Started": "%s", "Finished": "%s",\n' "$started" "$finished"
         printf '  "Host": {"Name": "%s", "OS": "%s", "Family": "%s", "Role": "%s", "Kernel": "%s", "Arch": "%s", "Container": %s},\n' \
-            "$(json_escape "$(hostname)")" "$(json_escape "$OS_NAME")" "$FAMILY" "$ROLE" "$KERNEL" "$ARCH" "$([ "$IN_CONTAINER" -eq 1 ] && echo true || echo false)"
+            "$(json_escape "$(host_name)")" "$(json_escape "$OS_NAME")" "$FAMILY" "$ROLE" "$KERNEL" "$ARCH" "$([ "$IN_CONTAINER" -eq 1 ] && echo true || echo false)"
         printf '  "Summary": {"OK": %d, "Changed": %d, "WouldChange": %d, "Warning": %d, "Error": %d, "Skipped": %d},\n' "$N_OK" "$N_CHANGED" "$N_WOULD" "$N_WARN" "$N_ERR" "$N_SKIP"
         printf '  "Results": [\n'
         local i

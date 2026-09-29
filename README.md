@@ -15,7 +15,7 @@ Every script has a read-only mode (`-AuditOnly` / `--check`) that shows what it 
 windows/Set-SecurityLogging.ps1   single script for any Windows (WS / Server / DC), PowerShell 2.0+
 windows/New-SecLoggingGpo.ps1     domain GPO add-on (run on a DC)
 windows/Install-SecLogging.ps1    automation: download -> build package -> install / share / GPO
-linux/set-security-logging.sh     single script for Linux (Debian/Ubuntu, RHEL/Rocky/Alma, SUSE)
+linux/set-security-logging.sh     single script for any Linux (deb, rpm, SUSE, Arch, Alpine families; see the table)
 linux/install.sh                  automation: offline bundle (build) and install (online or --from)
 vendor/sysmon/10.42, 10.2/        Sysmon for Windows 7 / 2008 / 2008 R2 (verified, pinned)
 vendor/sysmon-config/             SwiftOnSecurity configs for those versions (CC BY 4.0, pinned)
@@ -282,15 +282,32 @@ sudo ./linux/set-security-logging.sh --with-sysmon --configure-wazuh
 
 | What | How |
 |---|---|
-| Detection | `/etc/os-release` gives the deb/rpm/suse family. `graphical.target` means workstation, otherwise server. Also checks for a container and the free space on `/var` |
+| Detection | `/etc/os-release` (`ID`, then `ID_LIKE`, so derivatives are covered), otherwise by the package manager present. Also detects the init system (systemd / OpenRC / SysV), a container and the free space on `/var`. `graphical.target` means workstation, otherwise server |
 | auditd | installs the package. `auditd.conf`: `max_log_file` 50/100 MB × `num_logs` 10, `ROTATE`, `ENRICHED` (auditd ≥ 2.6) |
 | Rules | `/etc/audit/rules.d/50-seclogging.rules`: identity, sudoers, PAM, SSH, cron/at/systemd/rc/profile, ld.so.preload, kernel modules, hostname, time, ptrace injection, mounts, execve in user sessions (key `audit-wazuh-c` for the stock Wazuh rules), execve by web server accounts (`webshell`). `-w` lines are written only if the path exists. If immutable mode (`-e 2`) is on, the script warns that a reboot is needed. `--immutable` adds `-e 2` itself |
 | journald | `Storage=persistent`, `SystemMaxUse` 1G (WS) / 2G (server) via a drop-in, only increased |
-| Auth log | checks for rsyslog and `/var/log/auth.log` / `/var/log/secure`, and that logrotate keeps at least 7 days |
+| Auth log | checks for rsyslog and the auth log actually present (`/var/log/auth.log`, `/var/log/secure`, otherwise the family default), and that logrotate keeps at least 7 days |
 | Sysmon for Linux | `--with-sysmon`: installs from packages.microsoft.com (GPG-signed) or offline via `--sysmon-package-dir DIR` (a `SHA256SUMS` file is required). Uses a built-in config: processes, network except loopback, file creation in persistence locations |
 | Wazuh | checks the agent and whether audit/auth logs are collected. With `--configure-wazuh`, appends a managed block to `ossec.conf` |
 
 The report goes to `/var/log/seclogging/last-report.json`, and a summary line is sent to syslog (tag `seclogging`).
+
+### Supported distributions
+
+One script for all of them: it checks what the host is and picks the package manager, package names, log paths and service commands itself. Nothing needs to be told about the distribution.
+
+| Family | Distributions | Package manager | Offline bundle (`install.sh build`) | Sysmon for Linux |
+|---|---|---|---|---|
+| deb | Ubuntu, Debian, Mint, Astra, Pop!_OS, Kali and other derivatives | apt | yes | Ubuntu 18.04+, Debian 10+, and derivatives via their base |
+| rpm | RHEL, CentOS 7/8/Stream, Rocky, Alma, Oracle, Fedora, Amazon Linux | dnf / yum | yes | RHEL-compatible 7+ and Fedora (kernel ≥ 4.15, so not CentOS 7) |
+| suse | SLES, openSUSE Leap/Tumbleweed | zypper | no (online only) | SLES / Leap 15 |
+| arch | Arch, Manjaro, EndeavourOS | pacman | no (online only) | no |
+| alpine | Alpine (OpenRC, needs `apk add bash`) | apk | no (online only) | no |
+| other | anything with `/etc/os-release` | none | no | no |
+
+On an unknown distribution auditd must already be installed. The script then configures everything else and reports a warning instead of installing packages.
+
+CentOS 7 and 8 are end-of-life: their default repositories no longer work. The script says so and suggests `vault.centos.org` or the offline bundle.
 
 **Is Sysmon for Linux worth it?** Moderately. auditd remains the foundation. Sysmon adds network connections tied to processes, which is noisy and awkward with auditd, and the same event schema as Windows. The downsides:
 - it needs eBPF (kernel ≥ 4.15);
@@ -334,20 +351,23 @@ Alerts worth creating right away:
 |---|---|---|
 | Syntax of both `.ps1` files, PSScriptAnalyzer (Warning/Error) | pwsh 7 on Linux | clean |
 | PowerShell 2.0: no PS3+ constructs | grep + PSUseCompatibleSyntax | clean |
-| Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op | pwsh 7 | 81/81 |
-| `tests/linux-docker.sh`: check → apply → second apply with no changes | Ubuntu 24.04 and 20.04 with real auditd; Debian 12 and Rocky 9 with a stub auditctl (package mirrors were unreachable from the sandbox) | pass |
+| Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op, PowerShell 2.0 fallbacks | pwsh 7 | 90/90 |
+| `tests/linux-docker.sh`: check → apply → second apply with no changes | Ubuntu 24.04 / 20.04, Mint 21.3, Oracle Linux 9 with real auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch with a stub auditctl (their mirrors were unreachable from the sandbox) | pass (13 distributions) |
+| auditd installed by the script itself through the package manager | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | pass |
+| Server 2008 R2 lab: Sysmon 10.42 with the schema 4.22 config | VM, PowerShell 2.0 | running, events logged |
 | Generated auditd rules loaded into a real kernel | privileged container | 57/57 rules accepted |
 | Installing sysmonforlinux from packages.microsoft.com | Ubuntu 22.04 | installs (1.5.3) |
-| `tests/linux-bundle.sh`: `install.sh build` → install from the bundle on a clean container **without network** → second run with no changes → modified bundle rejected | Ubuntu 22.04 (with Sysmon), Ubuntu 24.04 | pass |
+| `tests/linux-bundle.sh`: `install.sh build` → install from the bundle on a clean container **without network** → second run with no changes → modified bundle rejected | Ubuntu 22.04 (with Sysmon), Ubuntu 24.04, Oracle Linux 9 (rpm) | pass |
 | `install.sh --fetch` downloads the main script from GitHub | Ubuntu 24.04 | pass |
 | Sysmon 10.42 and 10.2 in `vendor/`: Authenticode (Microsoft, valid at timestamp), FileVersion, pinned hash | osslsigncode + unit test | pass |
 
 **Not verified yet (needs a real lab):**
 - all Windows code that talks to the OS: wevtutil, auditpol, Sysmon installation, registry, DISM;
 - `New-SecLoggingGpo.ps1` against a real AD/SYSVOL;
-- behaviour on Server 2008/R2, including Sysmon 10.42/10.2 there (use the lab test above);
+- long-term stability of Sysmon 10.42/10.2 on Server 2008/R2 (installation verified; use `-CollectOnly` after a few hours and a reboot);
 - `Install-SecLogging.ps1` on real Windows (only its helper functions are unit-tested);
-- `linux/install.sh build` on the RHEL family (package mirrors were unreachable from the sandbox);
+- Alpine (no mirrors in the sandbox) and package installation on SUSE, Arch, Amazon Linux, CentOS 7;
+- `install.sh build` on CentOS 7 (`repotrack`);
 - Sysmon for Linux on a host with systemd (in a container, sysmon accepts any config without validating it).
 
 Suggested order:
@@ -359,5 +379,6 @@ Suggested order:
 ```bash
 pwsh -NoProfile -File tests/windows-unit.ps1
 ./tests/linux-docker.sh          # IMAGES="ubuntu:24.04 debian:12" to pick images
-./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 WITH_SYSMON=1
+./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 WITH_SYSMON=1, or IMAGE=oraclelinux:9
+# behind an HTTPS-only proxy: CA_FILE=/path/ca.crt PROXY=$HTTPS_PROXY ./tests/linux-docker.sh
 ```
