@@ -410,12 +410,27 @@ done
 
 `windows/agent.conf` is generated from the same channel list as the script. DNS-Client/Operational is deliberately not forwarded: it is very noisy, and Sysmon event 22 already covers DNS queries.
 
-Alerts worth creating right away:
-- **1102 / 104**: event log cleared;
-- **4719**: audit policy changed;
-- **SecLogging 1002**: the script failed to apply settings;
-- **Sysmon 16**: Sysmon configuration changed;
-- **4697 / 7045**: service installed.
+### Alert rules
+
+`wazuh/rules/seclogging_rules.xml` contains alert rules for the events the scripts enable. Install it on the manager:
+
+```bash
+cp wazuh/rules/seclogging_rules.xml /var/ossec/etc/rules/
+chown wazuh:wazuh /var/ossec/etc/rules/seclogging_rules.xml
+systemctl restart wazuh-manager
+```
+
+| Level | What |
+|---|---|
+| 14 | Possible DCSync: 4662 with replication rights from an account that is not a DC (`...$`) |
+| 12 | Security log cleared (1102); service installed from a user-writable folder (Users, Temp, AppData, ProgramData, Downloads); member added to a privileged group, matched by SID so it works in any Windows language (4728/4732/4756); DSRM password changed (4794); Sysmon stopped; Linux: `/var/log/audit` changed, root SSH keys, `ld.so.preload`, a web server account ran a program |
+| 10 | Another log cleared (104), event log service stopped (1100), audit policy changed (4719), Sysmon config changed (16), Kerberoasting (4769 RC4 to a service account), AS-REP roasting (4768 without pre-auth), unsigned module in LSASS (3065/3066), SecLogging failed (Windows 1002 / Linux `Error>0`); Linux: audit config, sudoers, PAM, ptrace injection |
+| 8 | Service installed (4697/7045), GPO modified (5136); Linux: accounts/groups, sshd config, cron, shell profiles, login.defs |
+| 3-6 | LDAP without signing (2889), SecLogging summary; Linux: systemd units, kernel modules, time change, passwd, network/mount/sudo |
+
+IDs 12300-12343. The rules hang off specific nodes of the stock ruleset (`if_sid`), so stock rules keep working and ours raise the level where needed. `tests/wazuh-rules.sh` runs a real wazuh-manager 4.14 in Docker, feeds 64 events the same way an agent does and checks which rule fired.
+
+Tuning: 4769 RC4 alerts are noisy where RC4 is still in use, and 7045/4697 during software rollouts. Lower them in `/var/ossec/etc/rules/local_rules.xml` with `<rule id="12313" level="5" overwrite="yes">` (copy the rule body).
 
 ---
 
@@ -426,6 +441,7 @@ Alerts worth creating right away:
 | Syntax of both `.ps1` files, PSScriptAnalyzer (Warning/Error) | pwsh 7 on Linux | clean |
 | PowerShell 2.0: no PS3+ constructs | grep + PSUseCompatibleSyntax | clean |
 | Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op, PowerShell 2.0 fallbacks | pwsh 7 | 152/152 |
+| Wazuh rules `tests/wazuh-rules.sh`: the manager starts with `seclogging_rules.xml`, 64 events (Windows via the eventchannel decoder, auditd, syslog) are fed the way an agent sends them; for each, the expected rule fires, or ours stay silent for normal events | wazuh-manager 4.14 in Docker | 64/64 |
 | `tests/linux-docker.sh`: check → apply → second apply with no changes | Ubuntu 24.04 / 20.04, Mint 21.3, Oracle Linux 9 with real auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch with a stub auditctl (their mirrors were unreachable from the sandbox) | pass (13 distributions) |
 | auditd installed by the script itself through the package manager | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | pass |
 | Server 2008 R2 lab: Sysmon 10.42 with the schema 4.22 config | VM, PowerShell 2.0 | running, events logged; stable after reboot (`-CollectOnly`: no crashes) |

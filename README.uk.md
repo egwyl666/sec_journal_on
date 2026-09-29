@@ -410,12 +410,27 @@ done
 
 `windows/agent.conf` згенеровано з того самого списку каналів, що й у скрипті. DNS-Client/Operational навмисно не відправляється: він дуже шумний, а DNS-запити вже є в Sysmon (подія 22).
 
-Алерти, які варто зробити одразу:
-- **1102 / 104** — очищення журналів;
-- **4719** — зміна політики аудиту;
-- **SecLogging 1002** — скрипт не зміг застосувати налаштування;
-- **Sysmon 16** — зміна конфігурації Sysmon;
-- **4697 / 7045** — встановлення служби.
+### Правила оповіщень
+
+`wazuh/rules/seclogging_rules.xml` — правила оповіщень для подій, які вмикають скрипти. Встановлення на менеджері:
+
+```bash
+cp wazuh/rules/seclogging_rules.xml /var/ossec/etc/rules/
+chown wazuh:wazuh /var/ossec/etc/rules/seclogging_rules.xml
+systemctl restart wazuh-manager
+```
+
+| Рівень | Що |
+|---|---|
+| 14 | Можливий DCSync: 4662 з правами реплікації від облікового запису, який не є DC (`...$`) |
+| 12 | Очищено журнал Security (1102); встановлено службу з каталогу, куди може писати користувач (Users, Temp, AppData, ProgramData, Downloads); додано до привілейованої групи — за SID, тож працює з будь-якою мовою Windows (4728/4732/4756); змінено пароль DSRM (4794); Sysmon зупинено; Linux: зміна `/var/log/audit`, ключі SSH root, `ld.so.preload`, веб-сервер запустив програму |
+| 10 | Очищено інший журнал (104), зупинено службу журналу (1100), змінено політику аудиту (4719), змінено конфіг Sysmon (16), Kerberoasting (4769 RC4 на службовий обліковий запис), AS-REP roasting (4768 без попередньої автентифікації), непідписаний модуль у LSASS (3065/3066), збій SecLogging (Windows 1002 / Linux `Error>0`); Linux: конфіг аудиту, sudoers, PAM, ін'єкція через ptrace |
+| 8 | Встановлено службу (4697/7045), змінено GPO (5136); Linux: облікові записи/групи, конфіг sshd, cron, профілі оболонки, login.defs |
+| 3–6 | LDAP без підпису (2889), підсумок SecLogging; Linux: юніти systemd, модулі ядра, зміна часу, passwd, мережа/mount/sudo |
+
+ID 12300–12343. Правила прив'язані до конкретних вузлів стандартного набору (`if_sid`), тож стандартні правила працюють як раніше, а наші підвищують рівень там, де треба. `tests/wazuh-rules.sh` запускає справжній wazuh-manager 4.14 у Docker, подає 64 події так само, як агент, і перевіряє, яке правило спрацювало.
+
+Налаштування: 4769 RC4 шумить там, де RC4 ще використовується, а 7045/4697 — під час розгортання програм. Знизити рівень можна в `/var/ossec/etc/rules/local_rules.xml`: `<rule id="12313" level="5" overwrite="yes">` (скопіюйте тіло правила).
 
 ---
 
@@ -426,6 +441,7 @@ done
 | Синтаксис обох `.ps1`, PSScriptAnalyzer (Warning/Error) | pwsh 7 на Linux | чисто |
 | PowerShell 2.0: немає конструкцій PS3+ | grep + PSUseCompatibleSyntax | чисто |
 | Юніт-тести `tests/windows-unit.ps1`: налаштування, розбір auditpol з локалізованими назвами, JSON, планування розмірів, перевірка хешів, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логіка аудиту й журналів на підмінених auditpol/wevtutil, повторний запуск нічого не змінює, запасні шляхи PowerShell 2.0 | pwsh 7 | 152/152 |
+| Правила Wazuh `tests/wazuh-rules.sh`: менеджер стартує з `seclogging_rules.xml`, 64 події (Windows через декодер eventchannel, auditd, syslog) подаються так, як їх шле агент; для кожної спрацьовує очікуване правило, а на звичайних подіях наші мовчать | wazuh-manager 4.14 у Docker | 64/64 |
 | `tests/linux-docker.sh`: check → apply → повторний apply без змін | Ubuntu 24.04 / 20.04, Mint 21.3, Oracle Linux 9 зі справжнім auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch із заглушкою auditctl (їхні дзеркала були недоступні з пісочниці) | успішно (13 дистрибутивів) |
 | Встановлення auditd самим скриптом через пакетний менеджер | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | успішно |
 | Стенд Server 2008 R2: Sysmon 10.42 з конфігом схеми 4.22 | VM, PowerShell 2.0 | працює, події пишуться; стабільний після перезавантаження (`-CollectOnly`: збоїв немає) |
