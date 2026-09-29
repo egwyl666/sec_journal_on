@@ -3,7 +3,7 @@
 #
 # Одна команда (root, потрібен інтернет):
 #   (curl -fsSL URL 2>/dev/null || wget -qO- URL) | sudo bash
-#   де URL = https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.2/linux/install.sh
+#   де URL = https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/linux/install.sh
 #   (працює і там, де є лише curl - мінімальні RHEL, і де лише wget - Ubuntu Desktop)
 # Знімає стан "до" і "після" і записує, що змінилося: /var/log/seclogging/changes/<час>-changes.txt
 #
@@ -31,7 +31,7 @@ set -u
 umask 022
 
 REPO_RAW="https://raw.githubusercontent.com/egwyl666/sec_journal_on"
-REF="v1.3.2"   # закріплений реліз; --ref HEAD - остання версія
+REF="v1.3.3"   # закріплений реліз; --ref HEAD - остання версія
 CMD="install"
 FROM=""
 OUT=""

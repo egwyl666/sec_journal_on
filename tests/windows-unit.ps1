@@ -205,14 +205,22 @@ $env:SystemRoot = Join-Path ([IO.Path]::GetTempPath()) ('sr-' + [guid]::NewGuid(
 New-Item -ItemType Directory -Path (Join-Path $env:SystemRoot 'security/audit') -Force | Out-Null
 [IO.File]::WriteAllLines((Join-Path $env:SystemRoot 'security/audit/audit.csv'), [string[]]@(
     'Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value'
-    ',System,Logon,{0CCE9215-69AE-11D9-BED3-505054503030},Success and Failure,,3'))
+    ',System,Logon,{0CCE9215-69AE-11D9-BED3-505054503030},Success and Failure,,3'
+    ',System,Account Lockout,{0CCE9217-69AE-11D9-BED3-505054503030},Success,,1'))
 foreach ($a in $s.AuditPolicy) { $global:AuditState[$a.Guid.ToUpper()] = 0 }
 $global:AuditState['0CCE9215-69AE-11D9-BED3-505054503030'] = 3
+$global:AuditState['0CCE9217-69AE-11D9-BED3-505054503030'] = 1
+$global:Calls = @()
 $Script:Report = @(); $Script:Counts = @{ OK = 0; Changed = 0; WouldChange = 0; Warning = 0; Error = 0; Skipped = 0 }
 $s4 = & $main -ExportSettings
 Invoke-AuditPolicy $s4 'Workstation'
 $pc = @($Script:Report | Where-Object { $_.Item -eq 'Process Creation' })[0]
 Assert ($pc.Status -eq 'Warning' -and $pc.Message -match 'тимчасово' -and $Script:Counts.Changed -eq 0 -and $Script:Counts.Error -eq 0) 'під доменною GPO аудиту локальні зміни позначено як тимчасові (Warning)'
+$al = @($Script:Report | Where-Object { $_.Item -eq 'Account Lockout' })[0]
+Assert ($al.Status -eq 'Warning' -and $al.Message -match 'змініть GPO' -and $global:AuditState['0CCE9217-69AE-11D9-BED3-505054503030'] -eq 1) 'підкатегорію, яку GPO задає слабше, не змінено локально (без 4719 туди-назад), лише Warning'
+$lg = @($Script:Report | Where-Object { $_.Item -eq 'Logon' })[0]
+Assert ($lg.Status -eq 'OK' -and $lg.Message -match 'задано GPO') 'підкатегорія, яку GPO задає достатньо, - OK'
+Assert (@($global:Calls | Where-Object { $_[0] -eq 'auditpol.exe' -and ($_ -join ' ') -match '0CCE921[57]' }).Count -eq 0) 'auditpol не викликається для підкатегорій із GPO'
 Remove-Item -LiteralPath $env:SystemRoot -Recurse -Force
 $env:SystemRoot = $oldRoot
 
