@@ -68,7 +68,7 @@ param(
     [switch]$Fetch,
     [string]$RepoOwner = 'egwyl666',
     [string]$RepoName = 'sec_journal_on',
-    [string]$RepoRef = 'v1.3.1',
+    [string]$RepoRef = 'v1.3.2',
     [switch]$Rebuild,
     [switch]$NoBuild,
     [switch]$UpdateRepoPins,
