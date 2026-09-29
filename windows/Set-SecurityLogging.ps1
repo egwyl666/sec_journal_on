@@ -118,6 +118,60 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+#region ---------------------------------------------------------------- вивід у консоль
+# PowerShell 2.0 в англійській Windows виводить кирилицю як "????" (кодова сторінка консолі 437).
+# Тоді текст для консолі транслітерується латиницею; JSON-звіт і журнал подій лишаються українською.
+
+$Script:NeedTranslit = $false
+if ($PSVersionTable.PSVersion.Major -lt 3) {
+    try {
+        $probe = [string][char]0x0456 + [char]0x0457 + [char]0x0454 + [char]0x0436
+        $enc = [Console]::OutputEncoding
+        $Script:NeedTranslit = ($enc.GetString($enc.GetBytes($probe)) -ne $probe)
+    }
+    catch { $Script:NeedTranslit = $false }
+}
+
+function Get-TranslitMap {
+    if ($Script:TranslitMap) { return $Script:TranslitMap }
+    $map = New-Object System.Collections.Hashtable ([System.StringComparer]::Ordinal)
+    foreach ($pair in ('А=A Б=B В=V Г=H Ґ=G Д=D Е=E Є=Ye Ж=Zh З=Z И=Y І=I Ї=Yi Й=Y К=K Л=L М=M Н=N О=O П=P Р=R С=S Т=T У=U Ф=F Х=Kh Ц=Ts Ч=Ch Ш=Sh Щ=Shch Ь= Ю=Yu Я=Ya Ё=Yo Ы=Y Э=E Ъ=' -split ' ')) {
+        $kv = $pair.Split('=')
+        $map[$kv[0]] = $kv[1]
+        $map[$kv[0].ToLower()] = $kv[1].ToLower()
+    }
+    $map[[string][char]0x02BC] = "'"
+    $Script:TranslitMap = $map
+    $map
+}
+
+function ConvertTo-ConsoleText {
+    param([string]$Text, [switch]$Force)
+    if ((-not $Script:NeedTranslit -and -not $Force) -or -not $Text) { return $Text }
+    $map = Get-TranslitMap
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $Text.ToCharArray()) {
+        $k = [string]$ch
+        if ($map.ContainsKey($k)) { [void]$sb.Append($map[$k]) } else { [void]$sb.Append($ch) }
+    }
+    $sb.ToString()
+}
+
+function Write-Host {
+    # Заміна Write-Host у межах скрипта: транслітерація за потреби; вивід через $Host.UI (без рекурсії)
+    param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [ConsoleColor]$ForegroundColor, [switch]$NoNewline)
+    $text = ConvertTo-ConsoleText ((@($Object) | ForEach-Object { [string]$_ }) -join ' ')
+    if ($PSBoundParameters.ContainsKey('ForegroundColor')) {
+        if ($NoNewline) { $Host.UI.Write($ForegroundColor, $Host.UI.RawUI.BackgroundColor, $text) }
+        else { $Host.UI.WriteLine($ForegroundColor, $Host.UI.RawUI.BackgroundColor, $text) }
+    }
+    elseif ($NoNewline) { $Host.UI.Write($text) }
+    else { $Host.UI.WriteLine($text) }
+}
+
+#endregion
+
 $ScriptVersion = '1.0.0'
 $ScriptPath = $MyInvocation.MyCommand.Path
 $ScriptDir = Split-Path -Parent $ScriptPath
@@ -293,47 +347,60 @@ function Add-Result {
     }
 }
 
+function Format-JsonText {
+    # Екранує рядок для JSON (без рекурсії)
+    param([string]$Text)
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('"')
+    foreach ($ch in $Text.ToCharArray()) {
+        $code = [int]$ch
+        if ($code -eq 34) { [void]$sb.Append('\"') }
+        elseif ($code -eq 92) { [void]$sb.Append('\\') }
+        elseif ($code -eq 10) { [void]$sb.Append('\n') }
+        elseif ($code -eq 13) { [void]$sb.Append('\r') }
+        elseif ($code -eq 9) { [void]$sb.Append('\t') }
+        elseif ($code -lt 32) { [void]$sb.Append(('\u{0:x4}' -f $code)) }
+        else { [void]$sb.Append($ch) }
+    }
+    [void]$sb.Append('"')
+    $sb.ToString()
+}
+
 function ConvertTo-JsonString {
+    # Простий JSON-серіалізатор для PowerShell 2.0 (ConvertTo-Json з'явився лише в 3.0).
+    # Захист від нескінченної рекурсії: обмеження глибини, розгортання PSObject, самопосилання -> рядок.
     param($Value, [int]$Depth = 0)
+    if ($null -eq $Value) { return 'null' }
+    $base = $Value
+    if ($base -is [System.Management.Automation.PSObject]) { $base = $base.PSObject.BaseObject }
+    if ($null -eq $base) { return 'null' }
+    if ($Depth -gt 20) { return (Format-JsonText ([string]$base)) }
     $pad = '  ' * $Depth
     $pad1 = '  ' * ($Depth + 1)
-    if ($null -eq $Value) { return 'null' }
-    if ($Value -is [bool]) { if ($Value) { return 'true' } else { return 'false' } }
-    if ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [uint32] -or $Value -is [uint64] -or $Value -is [decimal]) {
-        return ([string]$Value).Replace(',', '.')
-    }
-    if ($Value -is [string] -or $Value -is [char] -or $Value -is [guid] -or $Value -is [version] -or $Value -is [datetime] -or $Value -is [enum]) {
-        if ($Value -is [datetime]) { $s = $Value.ToString('o') } else { $s = [string]$Value }
-        $sb = New-Object System.Text.StringBuilder
-        [void]$sb.Append('"')
-        foreach ($ch in $s.ToCharArray()) {
-            switch ($ch) {
-                '"' { [void]$sb.Append('\"') }
-                '\' { [void]$sb.Append('\\') }
-                "`n" { [void]$sb.Append('\n') }
-                "`r" { [void]$sb.Append('\r') }
-                "`t" { [void]$sb.Append('\t') }
-                default {
-                    if ([int]$ch -lt 32) { [void]$sb.Append(('\u{0:x4}' -f [int]$ch)) } else { [void]$sb.Append($ch) }
-                }
-            }
-        }
-        [void]$sb.Append('"')
-        return $sb.ToString()
-    }
-    if ($Value -is [System.Collections.IDictionary]) {
-        if ($Value.Count -eq 0) { return '{}' }
+    $type = $base.GetType()
+    if ($base -is [bool]) { if ($base) { return 'true' } else { return 'false' } }
+    if ($base -is [char]) { return (Format-JsonText ([string]$base)) }
+    if ($type.IsPrimitive -or $base -is [decimal]) { return $base.ToString([System.Globalization.CultureInfo]::InvariantCulture) }
+    if ($base -is [datetime]) { return (Format-JsonText $base.ToString('o')) }
+    if ($base -is [string] -or $base -is [guid] -or $base -is [version] -or $base -is [enum]) { return (Format-JsonText ([string]$base)) }
+    if ($base -is [System.Collections.IDictionary]) {
+        if ($base.Count -eq 0) { return '{}' }
         $parts = @()
-        foreach ($k in $Value.Keys) { $parts += ('{0}{1}: {2}' -f $pad1, (ConvertTo-JsonString ([string]$k)), (ConvertTo-JsonString $Value[$k] ($Depth + 1))) }
+        foreach ($k in @($base.Keys)) { $parts += ('{0}{1}: {2}' -f $pad1, (Format-JsonText ([string]$k)), (ConvertTo-JsonString $base[$k] ($Depth + 1))) }
         return "{`n" + ($parts -join ",`n") + "`n$pad}"
     }
-    if ($Value -is [System.Collections.IEnumerable]) {
+    if ($base -is [System.Collections.IEnumerable]) {
         $parts = @()
-        foreach ($i in $Value) { $parts += ($pad1 + (ConvertTo-JsonString $i ($Depth + 1))) }
+        foreach ($i in $base) {
+            $ib = $i
+            if ($ib -is [System.Management.Automation.PSObject]) { $ib = $ib.PSObject.BaseObject }
+            if ([object]::ReferenceEquals($ib, $base)) { $parts += ($pad1 + (Format-JsonText ([string]$ib))); continue }
+            $parts += ($pad1 + (ConvertTo-JsonString $i ($Depth + 1)))
+        }
         if ($parts.Count -eq 0) { return '[]' }
         return "[`n" + ($parts -join ",`n") + "`n$pad]"
     }
-    return (ConvertTo-JsonString ([string]$Value) $Depth)
+    Format-JsonText ([string]$base)
 }
 
 #endregion
@@ -484,22 +551,58 @@ function Get-HostInfo {
 #endregion
 #region ---------------------------------------------------------------- канали журналів подій
 
-[void][Reflection.Assembly]::LoadWithPartialName('System.Core')
+# System.Core (.NET 3.5) потрібен для EventLogConfiguration; на 2008 R2 без .NET 3.5.1 - запасний шлях через wevtutil
+$Script:HasEventingApi = $false
+try {
+    [void][Reflection.Assembly]::LoadWithPartialName('System.Core')
+    $Script:HasEventingApi = [bool]('System.Diagnostics.Eventing.Reader.EventLogConfiguration' -as [type])
+}
+catch { $Script:HasEventingApi = $false }
 
 function Get-ChannelState {
+    # Стан каналу журналу. Спершу через .NET (System.Core, .NET 3.5+); якщо його немає
+    # (Server 2008 R2 без компонента .NET 3.5.1) - через wevtutil gl /f:xml.
     param([string]$Name)
     $st = New-OD
     $st.Name = $Name
-    try {
-        $cfg = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration($Name)
-        $st.Exists = $true
-        $st.Enabled = [bool]$cfg.IsEnabled
-        $st.MaxBytes = [long]$cfg.MaximumSizeInBytes
-        $st.Mode = [string]$cfg.LogMode
-        $cfg.Dispose()
+    $st.Exists = $false
+    if ($Script:HasEventingApi) {
+        try {
+            $cfg = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration($Name)
+            $st.Exists = $true
+            $st.Enabled = [bool]$cfg.IsEnabled
+            $st.MaxBytes = [long]$cfg.MaximumSizeInBytes
+            $st.Mode = [string]$cfg.LogMode
+            $cfg.Dispose()
+        }
+        catch { $st.Exists = $false }
+        return $st
     }
-    catch { $st.Exists = $false }
+    $r = Invoke-Native 'wevtutil.exe' @('gl', $Name, '/f:xml')
+    if ($r.Code -ne 0 -or -not $r.Output) { return $st }
+    $parsed = ConvertFrom-ChannelXml $r.Output
+    if (-not $parsed) { return $st }
+    foreach ($k in @($parsed.Keys)) { $st[$k] = $parsed[$k] }
     $st
+}
+
+function ConvertFrom-ChannelXml {
+    # Розбирає вивід "wevtutil gl <канал> /f:xml" -> @{ Exists; Enabled; MaxBytes; Mode }
+    param([string]$Xml)
+    try { $x = [xml]($Xml -replace '^\s*<\?xml[^>]*\?>', '') } catch { return $null }
+    $ch = $x.DocumentElement
+    if (-not $ch) { return $null }
+    $log = $ch.SelectSingleNode('*[local-name()="logging"]')
+    $h = @{ Exists = $true; Enabled = ([string]$ch.GetAttribute('enabled') -eq 'true'); MaxBytes = 0L; Mode = 'Circular' }
+    if ($log) {
+        $max = $log.SelectSingleNode('*[local-name()="maxSize"]')
+        if ($max) { $h.MaxBytes = [long]$max.InnerText }
+        $ret = $log.SelectSingleNode('*[local-name()="retention"]')
+        $ab = $log.SelectSingleNode('*[local-name()="autoBackup"]')
+        if ($ab -and $ab.InnerText -eq 'true') { $h.Mode = 'AutoBackup' }
+        elseif ($ret -and $ret.InnerText -eq 'true') { $h.Mode = 'Retain' }
+    }
+    $h
 }
 
 function Get-ChannelPolicy {
@@ -639,6 +742,11 @@ function Invoke-AuditPolicy {
         $want = [int]$a[$RoleName]
         if ($want -eq 0) { continue }
         $guid = $a.Guid.ToUpper()
+        if ($current.Count -gt 0 -and -not $current.ContainsKey($guid)) {
+            # auditpol /backup перелічує всі підкатегорії ОС; якщо GUID немає - його не підтримує ця версія Windows
+            Add-Result 'AuditPolicy' $a.Name 'Skipped' 'Підкатегорія не підтримується цією версією Windows'
+            continue
+        }
         $cur = 0; if ($current.ContainsKey($guid)) { $cur = $current[$guid] }
         $target = $cur -bor $want
         $item = $a.Name
@@ -1152,7 +1260,11 @@ try {
     $report.Summary = $Script:Counts
     $report.Results = $Script:Report
     if (-not $ReportPath) { $ReportPath = Join-Path $WorkDir ('report-{0:yyyyMMdd-HHmmss}.json' -f $started) }
-    $json = ConvertTo-JsonString $report
+    try { $json = ConvertTo-JsonString $report }
+    catch {
+        Write-Host "Не вдалося сформувати JSON-звіт: $($_.Exception.Message)" -ForegroundColor Yellow
+        $json = '{ "Tool": "Set-SecurityLogging", "Error": ' + (Format-JsonText ([string]$_.Exception.Message)) + ', "Summary": ' + (Format-JsonText $summary) + ' }'
+    }
     [System.IO.File]::WriteAllText($ReportPath, $json, (New-Object System.Text.UTF8Encoding($false)))
     [System.IO.File]::WriteAllText((Join-Path $WorkDir 'last-report.json'), $json, (New-Object System.Text.UTF8Encoding($false)))
 
