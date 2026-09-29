@@ -442,32 +442,54 @@ ID 12300–12343. Правила прив'язані до конкретних �
 | PowerShell 2.0: немає конструкцій PS3+ | grep + PSUseCompatibleSyntax | чисто |
 | Юніт-тести `tests/windows-unit.ps1`: налаштування, розбір auditpol з локалізованими назвами, JSON, планування розмірів, перевірка хешів, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логіка аудиту й журналів на підмінених auditpol/wevtutil, повторний запуск нічого не змінює, запасні шляхи PowerShell 2.0 | pwsh 7 | 155/155 |
 | Правила Wazuh `tests/wazuh-rules.sh`: менеджер стартує з `seclogging_rules.xml`, 64 події (Windows через декодер eventchannel, auditd, syslog) подаються так, як їх шле агент; для кожної спрацьовує очікуване правило, а на звичайних подіях наші мовчать | wazuh-manager 4.14 у Docker | 64/64 |
-| `tests/linux-docker.sh`: check → apply → повторний apply без змін | Ubuntu 24.04 / 20.04, Mint 21.3, Oracle Linux 9 зі справжнім auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch із заглушкою auditctl (їхні дзеркала були недоступні з пісочниці) | успішно (13 дистрибутивів) |
+| `tests/linux-docker.sh`: check → apply → повторний apply без змін | Ubuntu 26.04 / 24.04 / 20.04, Mint 21.3, Oracle Linux 9 зі справжнім auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch із заглушкою auditctl (їхні дзеркала були недоступні з пісочниці) | успішно (14 дистрибутивів) |
 | Встановлення auditd самим скриптом через пакетний менеджер | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | успішно |
 | Стенд Server 2008 R2: Sysmon 10.42 з конфігом схеми 4.22 | VM, PowerShell 2.0 | працює, події пишуться; стабільний після перезавантаження (`-CollectOnly`: збоїв немає) |
 | Одна команда на справжніх машинах: звіт до/після, повторний запуск без змін | Windows 10 Pro 22H2 (ru-RU), Ubuntu 26.04 | успішно |
+| Одна команда на контролері домену: локальні налаштування, обидві GPO створено й прив'язано, SACL для DCSync на корені домену, блок агента Wazuh, звіт до/після | Windows Server 2022 DC (ru-RU), наявна доменна GPO аудиту, системний диск 30 ГБ | успішно (подробиці нижче) |
+| GPO застосовано: `gpresult` показує обидві, `auditpol` — повний набір для DC, значення тримаються після оновлення політик; повторний запуск не піднімає версії GPO | той самий DC | успішно |
+| Перевірка покриття незалежним інструментом (SOC_Audit) після розгортання | той самий DC | усі цільові події видно; «частково» — лише там, де так вирішено свідомо, див. нижче |
 | sshd `LogLevel VERBOSE`: з `Include` і без, з блоком `Match`; `sshd -t` проходить; повторний запуск нічого не змінює | Ubuntu 24.04, Oracle Linux 9 | успішно |
 | Завантаження згенерованих правил auditd у справжнє ядро | privileged-контейнер | прийнято 57/57 правил |
 | `tests/linux-bundle.sh`: `install.sh build` → встановлення з комплекту на чистий контейнер **без мережі** → повторний запуск без змін → змінений комплект відхилено | Ubuntu 22.04, Ubuntu 24.04, Oracle Linux 9 (rpm) | успішно |
 | `install.sh --fetch` завантажує основний скрипт з GitHub | Ubuntu 24.04 | успішно |
 | Sysmon 10.42 і 10.2 у `vendor/`: Authenticode (Microsoft, дійсний на момент мітки часу), FileVersion, закріплений хеш | osslsigncode + юніт-тест | успішно |
 
-**Ще не перевірено (потрібен реальний стенд):**
-- увесь Windows-код, що звертається до ОС: wevtutil, auditpol, встановлення Sysmon, реєстр, DISM;
-- `New-SecLoggingGpo.ps1` на справжньому AD/SYSVOL;
-- `Install-SecLogging.ps1` на справжній Windows (юніт-тестами покрито лише його допоміжні функції);
+### Чого навчив справжній контролер домену
+
+Windows Server 2022 DC з російським інтерфейсом, у домені вже були свої GPO аудиту:
+
+- **Доменна GPO аудиту замінює всю локальну політику аудиту** при кожному оновленні політик (на DC — кожні 5 хвилин). Локальні зміни `auditpol` зникали за кілька хвилин, тому на DC крок GPO тепер виконується завжди, навіть якщо налаштування самого DC завершилося з помилками.
+- **Конфлікти вирішує порядок прив'язки.** Налаштування з кількох GPO об'єднуються по підкатегоріях, і перемагає GPO, вища в порядку прив'язки на OU=Domain Controllers. `SEC-Logging-DomainControllers` має лишатися першою.
+- **Скрипт більше не чіпає підкатегорії, які задає GPO.** Локальна зміна призводила до того, що скрипт і групова політика перезаписували одне одного, а це близько сотні подій 4719 на добу (і стільки ж алертів у Wazuh). Тепер скрипт лише попереджає, якщо значення в GPO слабше за потрібне.
+- **Розмір журналу «Active Directory Web Services» адміністратор змінити не може:** його налаштування захищені ACL служби. Це тепер Warning, і решту запуску воно не блокує.
+- **Текст помилок `wevtutil` виходив «кракозябрами»** (ANSI, прочитаний як OEM). Тепер він перекодовується.
+- **Версії GPO росли з кожним запуском,** бо кожне значення переписувалося. Тепер записуються лише реальні зміни.
+- **Малий системний диск змушує брати профіль Minimal.** При 6,6 ГБ вільних із 30 ГБ DC отримав Security 256 МБ (близько тижня історії) і PowerShell 128 МБ (кілька днів, менше, коли інструмент аудиту заливає журнал модулів). Це нормально, поки агент Wazuh відправляє події. На більшому диску наступний запуск сам вибере більший профіль.
+- **Свідомо не збирається**, і інструменти аудиту позначають це як «частково»: успішні 5145 на SYSVOL/NETLOGON (Detailed File Share на DC — лише «Відмова»), WFP 5156/5152 (замість них збирається `pfirewall.log`), 4663 без SACL на конкретних теках, аналітичний журнал DNS.
+
+Що варто перевірити на DC після розгортання:
+
+```powershell
+gpresult /scope computer /r | findstr SEC-Logging        # обидві GPO застосовано
+auditpol /get /category:*                                  # повний набір, стабільний через 10 хвилин
+(Get-GPInheritance -Target (Get-ADDomain).DomainControllersContainer).GpoLinks | Select Order, DisplayName   # наша перша
+Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4719; StartTime=(Get-Date).AddDays(-1)} |
+  ForEach-Object { '{0}  {1}' -f $_.Properties[1].Value, $_.Properties[6].Value } | Group-Object | Sort-Object Count -Descending
+```
+
+У російській Windows `auditpol /subcategory:` приймає лише локалізовані назви або GUID у лапках: `auditpol /get /subcategory:"{0CCE922B-69AE-11D9-BED3-505054503030}"`.
+
+**Ще не перевірено:**
+- робочі станції й рядові сервери домену, які налаштовує startup-скрипт GPO (в процесі);
+- англійська Windows на справжній машині;
 - Alpine (дзеркала недоступні з пісочниці) і встановлення пакетів на SUSE, Arch, Amazon Linux, CentOS 7;
-- `install.sh build` на CentOS 7 (`repotrack`);
-
-Рекомендований порядок:
-
-1. Запустити `-AuditOnly` на робочій станції, сервері й DC (RU та EN) і зібрати JSON-звіти.
-2. Застосувати на одному тестовому хості кожного типу. Повторний запуск має показати `Changed=0`.
-3. Запустити `New-SecLoggingGpo.ps1 -WhatIf`, потім застосувати до тестової OU (`-LinkTargets "OU=Test,DC=corp,DC=local"`), після чого перевірити `gpresult` і `auditpol`.
+- `install.sh build` на CentOS 7 (`repotrack`).
 
 ```bash
 pwsh -NoProfile -File tests/windows-unit.ps1
 ./tests/linux-docker.sh          # IMAGES="ubuntu:24.04 debian:12" щоб вибрати образи
 ./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 або IMAGE=oraclelinux:9
+./tests/wazuh-rules.sh           # WAZUH_IMAGE=wazuh/wazuh-manager:4.14.0
 # за проксі лише з HTTPS: CA_FILE=/path/ca.crt PROXY=$HTTPS_PROXY ./tests/linux-docker.sh
 ```

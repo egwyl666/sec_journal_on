@@ -442,32 +442,54 @@ Tuning: 4769 RC4 alerts are noisy where RC4 is still in use, and 7045/4697 durin
 | PowerShell 2.0: no PS3+ constructs | grep + PSUseCompatibleSyntax | clean |
 | Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op, PowerShell 2.0 fallbacks | pwsh 7 | 155/155 |
 | Wazuh rules `tests/wazuh-rules.sh`: the manager starts with `seclogging_rules.xml`, 64 events (Windows via the eventchannel decoder, auditd, syslog) are fed the way an agent sends them; for each, the expected rule fires, or ours stay silent for normal events | wazuh-manager 4.14 in Docker | 64/64 |
-| `tests/linux-docker.sh`: check → apply → second apply with no changes | Ubuntu 24.04 / 20.04, Mint 21.3, Oracle Linux 9 with real auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch with a stub auditctl (their mirrors were unreachable from the sandbox) | pass (13 distributions) |
+| `tests/linux-docker.sh`: check → apply → second apply with no changes | Ubuntu 26.04 / 24.04 / 20.04, Mint 21.3, Oracle Linux 9 with real auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch with a stub auditctl (their mirrors were unreachable from the sandbox) | pass (14 distributions) |
 | auditd installed by the script itself through the package manager | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | pass |
 | Server 2008 R2 lab: Sysmon 10.42 with the schema 4.22 config | VM, PowerShell 2.0 | running, events logged; stable after reboot (`-CollectOnly`: no crashes) |
 | One command on real machines: before/after report, second run with no changes | Windows 10 Pro 22H2 (ru-RU), Ubuntu 26.04 | pass |
+| One command on a domain controller: local settings, both GPOs created and linked, DCSync SACL on the domain root, Wazuh agent block, before/after report | Windows Server 2022 DC (ru-RU), existing domain audit GPO, 30 GB system disk | pass (details below) |
+| GPOs applied: `gpresult` lists both, `auditpol` shows the full DC set, values stay after policy refresh; a second run does not bump GPO versions | same DC | pass |
+| Coverage audit by an independent tool (SOC_Audit) after the rollout | same DC | all target events visible; the only "partial" items are deliberate choices, see below |
 | sshd `LogLevel VERBOSE`: with and without `Include`, with a `Match` block; `sshd -t` passes; second run is a no-op | Ubuntu 24.04, Oracle Linux 9 | pass |
 | Generated auditd rules loaded into a real kernel | privileged container | 57/57 rules accepted |
 | `tests/linux-bundle.sh`: `install.sh build` → install from the bundle on a clean container **without network** → second run with no changes → modified bundle rejected | Ubuntu 22.04, Ubuntu 24.04, Oracle Linux 9 (rpm) | pass |
 | `install.sh --fetch` downloads the main script from GitHub | Ubuntu 24.04 | pass |
 | Sysmon 10.42 and 10.2 in `vendor/`: Authenticode (Microsoft, valid at timestamp), FileVersion, pinned hash | osslsigncode + unit test | pass |
 
-**Not verified yet (needs a real lab):**
-- all Windows code that talks to the OS: wevtutil, auditpol, Sysmon installation, registry, DISM;
-- `New-SecLoggingGpo.ps1` against a real AD/SYSVOL;
-- `Install-SecLogging.ps1` on real Windows (only its helper functions are unit-tested);
+### What the real domain controller taught us
+
+Windows Server 2022 DC, Russian UI, a domain that already had its own audit GPOs:
+
+- **A domain audit GPO replaces the whole local audit policy** on every refresh (every 5 minutes on a DC). Local `auditpol` changes vanished within minutes, so on a DC the GPO step now always runs, even if configuring the DC itself had errors.
+- **Link order decides conflicts.** Settings from several GPOs merge per subcategory, and the GPO higher in the link order on OU=Domain Controllers wins. `SEC-Logging-DomainControllers` must stay first.
+- **The script no longer touches subcategories defined by a GPO.** Changing them locally made the script and Group Policy overwrite each other, which produced about a hundred 4719 events a day (and a Wazuh alert each). Now it only warns if the GPO value is weaker than needed.
+- **The "Active Directory Web Services" log cannot be resized by an administrator.** Its settings are protected by the service ACL. This is reported as a Warning and no longer blocks the rest of the run.
+- **Error text from `wevtutil` came out garbled** (ANSI text read as OEM). It is now re-decoded.
+- **GPO versions grew on every run** because each value was rewritten. Now only real changes are written.
+- **A small system disk forces the Minimal size profile.** With 6.6 GB free out of 30 GB, the DC got Security 256 MB (about a week of history) and PowerShell 128 MB (a few days, less when an audit tool floods module logging). This is fine while the Wazuh agent ships events. A larger disk makes the next run pick a bigger profile on its own.
+- **Deliberately not collected**, and marked "partial" by audit tools: successful 5145 on SYSVOL/NETLOGON (Detailed File Share is Failure-only on DCs), WFP 5156/5152 (`pfirewall.log` is collected instead), 4663 without a SACL on specific folders, and the DNS analytic log.
+
+Checks worth running on a DC after rollout:
+
+```powershell
+gpresult /scope computer /r | findstr SEC-Logging        # both GPOs applied
+auditpol /get /category:*                                  # full set, stable after 10 minutes
+(Get-GPInheritance -Target (Get-ADDomain).DomainControllersContainer).GpoLinks | Select Order, DisplayName   # ours is first
+Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4719; StartTime=(Get-Date).AddDays(-1)} |
+  ForEach-Object { '{0}  {1}' -f $_.Properties[1].Value, $_.Properties[6].Value } | Group-Object | Sort-Object Count -Descending
+```
+
+On a Russian Windows, `auditpol /subcategory:` only accepts localized names or GUIDs in quotes: `auditpol /get /subcategory:"{0CCE922B-69AE-11D9-BED3-505054503030}"`.
+
+**Not verified yet:**
+- domain workstations and member servers configured by the GPO startup script (pending);
+- Windows in English on a real machine;
 - Alpine (no mirrors in the sandbox) and package installation on SUSE, Arch, Amazon Linux, CentOS 7;
-- `install.sh build` on CentOS 7 (`repotrack`);
-
-Suggested order:
-
-1. Run `-AuditOnly` on a workstation, a server and a DC (RU and EN) and collect the JSON reports.
-2. Apply on one test host of each type. A second run must report `Changed=0`.
-3. Run `New-SecLoggingGpo.ps1 -WhatIf`, then apply to a test OU (`-LinkTargets "OU=Test,DC=corp,DC=local"`), then check `gpresult` and `auditpol`.
+- `install.sh build` on CentOS 7 (`repotrack`).
 
 ```bash
 pwsh -NoProfile -File tests/windows-unit.ps1
 ./tests/linux-docker.sh          # IMAGES="ubuntu:24.04 debian:12" to pick images
 ./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 or IMAGE=oraclelinux:9
+./tests/wazuh-rules.sh           # WAZUH_IMAGE=wazuh/wazuh-manager:4.14.0
 # behind an HTTPS-only proxy: CA_FILE=/path/ca.crt PROXY=$HTTPS_PROXY ./tests/linux-docker.sh
 ```
