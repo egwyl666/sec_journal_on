@@ -68,7 +68,7 @@ param(
     [switch]$Fetch,
     [string]$RepoOwner = 'egwyl666',
     [string]$RepoName = 'sec_journal_on',
-    [string]$RepoRef = 'v1.3.0',
+    [string]$RepoRef = 'v1.3.1',
     [switch]$Rebuild,
     [switch]$NoBuild,
     [switch]$UpdateRepoPins,
@@ -224,6 +224,28 @@ function Update-PackageScript {
     $r
 }
 
+function Get-PinnedHashes {
+    # Хеші, закріплені в самому Set-SecurityLogging.ps1 ($DefaultPins): конфіги Sysmon і Sysmon для старих ОС
+    param([string]$ScriptPath)
+    $h = @{}
+    if (-not (Test-Path -LiteralPath $ScriptPath)) { return $h }
+    foreach ($m in [regex]::Matches([System.IO.File]::ReadAllText($ScriptPath), "(?m)^\s*(ConfigSha256|Legacy\w+Sha256)\s*=\s*'([0-9a-fA-F]{64})'")) {
+        $h[$m.Groups[1].Value] = $m.Groups[2].Value.ToLower()
+    }
+    $h
+}
+
+function Test-PackagePins {
+    # Пакет зібрано старішою версією, якщо його sources.ini не збігається з хешами, закріпленими у свіжому скрипті
+    # (новий реліз оновив конфіг Sysmon тощо). Повертає назви ключів, що розійшлися.
+    param([string]$SrcDir, [string]$PkgDir)
+    $want = Get-PinnedHashes (Join-Path $SrcDir 'Set-SecurityLogging.ps1')
+    $ini = Read-IniFile (Join-Path $PkgDir 'sources.ini')
+    $diff = @()
+    foreach ($k in @($want.Keys | Sort-Object)) { if ([string]$ini[$k] -ne $want[$k]) { $diff += $k } }
+    $diff
+}
+
 function Get-ArchiveUrl {
     param([string]$Owner, [string]$Repo, [string]$Ref)
     'https://github.com/{0}/{1}/archive/{2}.zip' -f $Owner, $Repo, $Ref
@@ -269,6 +291,9 @@ function Save-Download {
 function Expand-ZipFile {
     param([string]$ZipPath, [string]$Destination)
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    # повні шляхи: і ZipFile, і Shell.Application рахують відносні від поточної теки процесу, а не від $PWD
+    $ZipPath = (Resolve-Path -LiteralPath $ZipPath).ProviderPath
+    $Destination = (Resolve-Path -LiteralPath $Destination).ProviderPath
     try {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
@@ -352,14 +377,18 @@ else {
 Write-Step 'Пакет'
 $needSysmon = -not $SkipSysmon
 $check = Test-Package $PackagePath $needSysmon
+# пакет від попереднього релізу: хеші, закріплені у свіжому скрипті, могли змінитися
+$stalePins = @()
+if ($check.Ok -and $srcWindows) { $stalePins = @(Test-PackagePins $srcWindows $PackagePath) }
 if ($NoBuild) {
     if (-not $check.Ok) {
         Write-Host ("    пакет некоректний: {0}" -f ($check.Problems -join '; ')) -ForegroundColor Red
         exit 2
     }
+    if ($stalePins.Count) { Write-Host ("    УВАГА: пакет зібрано іншою версією (розбіжні хеші: {0}); без -NoBuild його буде перезібрано" -f ($stalePins -join ', ')) -ForegroundColor Yellow }
     Write-Host '    наявний пакет перевірено (-NoBuild)'
 }
-elseif ($check.Ok -and -not $Rebuild) {
+elseif ($check.Ok -and -not $Rebuild -and $stalePins.Count -eq 0) {
     Write-Host '    наявний пакет коректний, використовується повторно (-Rebuild щоб зібрати заново)'
     # Sysmon і конфіги лишаються (перевірені за SHA256), а скрипт - завжди найсвіжіший
     if ($srcWindows) {
@@ -369,6 +398,7 @@ elseif ($check.Ok -and -not $Rebuild) {
 }
 else {
     if (-not $check.Ok -and (Test-Path -LiteralPath $PackagePath)) { Write-Host ("    збираємо заново: {0}" -f ($check.Problems -join '; ')) }
+    elseif ($stalePins.Count) { Write-Host ("    збираємо заново: у новій версії змінилися закріплені хеші ({0})" -f ($stalePins -join ', ')) }
     $buildArgs = Add-SwitchArgs @('-BuildPackage', $PackagePath) @{ AcceptNewSysmon = $AcceptNewSysmon } @('AcceptNewSysmon')
     $code = Invoke-ChildScript (Join-Path $srcWindows 'Set-SecurityLogging.ps1') $buildArgs
     if ($code -ne 0) { Write-Host "    збирання пакета завершилося з кодом $code" -ForegroundColor Red; exit $code }
