@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # install.sh - автоматизація "завантажити -> зібрати комплект -> встановити" для Linux.
 #
+# Одна команда (root, потрібен інтернет):
+#   curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh | sudo bash
+#   (або: wget -qO- ... | sudo bash)
+# Знімає стан "до" і "після" і записує, що змінилося: /var/log/seclogging/changes/<час>-changes.txt
+#
 # Використання:
 #   sudo ./install.sh [install] [параметри] [параметри set-security-logging.sh]
 #   sudo ./install.sh build [--out DIR] [--no-auditd]
@@ -16,6 +21,7 @@
 #   --no-auditd      build: не додавати пакети auditd
 #   --fetch          завантажити свіжий set-security-logging.sh з GitHub
 #   --ref REF        гілка/тег/коміт для --fetch (типово HEAD)
+#   --no-wazuh       не дописувати збір журналів в ossec.conf агента Wazuh (типово дописує, якщо агент є)
 #   -h|--help
 # Усі інші параметри (--check, --configure-wazuh, --profile, --immutable, --quiet, ...)
 # передаються в set-security-logging.sh без змін.
@@ -30,10 +36,13 @@ FROM=""
 OUT=""
 WITH_AUDITD=1
 FETCH=0
+WAZUH=1
+# запуск через "curl ... | bash": поруч немає файлів - основний скрипт завантажуємо
+[ -f "$0" ] || FETCH=1
 PASS=()
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 
-usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { echo "ПОМИЛКА: $1" >&2; exit "${2:-2}"; }
 info() { echo "==> $*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -46,6 +55,7 @@ while [ $# -gt 0 ]; do
         --with-sysmon) die "Sysmon for Linux більше не підтримується: достатньо auditd і journald" 64 ;;
         --no-auditd) WITH_AUDITD=0 ;;
         --fetch) FETCH=1 ;;
+        --no-wazuh) WAZUH=0 ;;
         --ref) REF="${2:-}"; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; PASS+=("$@"); break ;;
@@ -211,7 +221,12 @@ install_offline_pkgs() { # install_offline_pkgs DIR - ставить лише в
 }
 
 do_install() {
-    local main args=(${PASS[@]+"${PASS[@]}"})
+    local main args=(${PASS[@]+"${PASS[@]}"}) check=0 a
+    for a in ${PASS[@]+"${PASS[@]}"}; do [ "$a" = "--check" ] && check=1; [ "$a" = "--configure-wazuh" ] && WAZUH=0; done
+    [ "$WAZUH" -eq 1 ] && args+=(--configure-wazuh)
+    local stamp snapdir before after changes
+    stamp=$(date +%Y%m%d-%H%M%S); snapdir=/var/log/seclogging/changes
+    before="$snapdir/$stamp-before.tsv"; after="$snapdir/$stamp-after.tsv"; changes="$snapdir/$stamp-changes.txt"
     if [ -n "$FROM" ]; then
         FROM=$(cd "$FROM" 2>/dev/null && pwd) || die "теку комплекту не знайдено"
         info "Перевірка комплекту $FROM"
@@ -225,20 +240,41 @@ do_install() {
         if [ "$b_id/$b_ver/$b_arch" != "$HOST_ID/$HOST_VER/$HOST_ARCH" ]; then
             echo "    УВАГА: комплект зібрано для $b_id $b_ver $b_arch, а цей хост $HOST_ID $HOST_VER $HOST_ARCH - пакети можуть не встановитися"
         fi
+        main="$FROM/set-security-logging.sh"
+        info "Знімок стану \"до\""
+        bash "$main" --snapshot "$before" >/dev/null || echo "    не вдалося"
         if ! have auditctl && [ -d "$FROM/auditd" ]; then
             info "Офлайн-встановлення auditd з комплекту"
             if install_offline_pkgs "$FROM/auditd"; then echo "    встановлено"
             else echo "    не вдалося (див. /tmp/seclogging-offline.log); set-security-logging.sh спробує через менеджер пакетів"; fi
         fi
-        main="$FROM/set-security-logging.sh"
     else
         main=$(get_main_script) || die "не вдалося отримати set-security-logging.sh (перевірте інтернет або використайте --from)"
+        info "Знімок стану \"до\""
+        bash "$main" --snapshot "$before" >/dev/null || echo "    не вдалося"
     fi
     info "Запуск $main ${args[*]:-}"
-    bash "$main" ${args[@]+"${args[@]}"}
+    local rc=0
+    bash "$main" ${args[@]+"${args[@]}"} || rc=$?
+    if [ "$check" -eq 0 ] && [ -f "$before" ]; then
+        info "Знімок стану \"після\" і порівняння"
+        if bash "$main" --snapshot "$after" >/dev/null; then
+            bash "$main" --compare "$before" "$after" --compare-out "$changes"
+        fi
+    fi
+    echo
+    if [ "$rc" -eq 0 ]; then
+        if [ "$check" -eq 1 ]; then echo "ГОТОВО: перевірку виконано, нічого не змінено."; else echo "ГОТОВО: журналювання безпеки налаштовано."; fi
+    else
+        echo "ЗАВЕРШЕНО З ПОМИЛКАМИ (код $rc). Надішліть файли звіту адміністратору."
+    fi
+    echo "Звіт:          /var/log/seclogging/last-report.json"
+    [ -f "$changes" ] && echo "Що змінилося:  $changes"
+    [ "$check" -eq 1 ] && [ -f "$before" ] && echo "Стан:          $before"
+    return "$rc"
 }
 
 case "$CMD" in
     build) do_build ;;
-    install) do_install ;;
+    install) do_install; exit $? ;;
 esac

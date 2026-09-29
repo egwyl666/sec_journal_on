@@ -13,6 +13,9 @@
 #   --immutable             заблокувати правила аудиту (-e 2) до перезавантаження
 #   --report FILE           шлях до JSON-звіту (типово /var/log/seclogging/report-<час>.json)
 #   --quiet                 виводити лише підсумок
+#   --snapshot FILE         записати знімок поточного стану у FILE і вийти (нічого не змінює)
+#   --compare BEFORE AFTER  показати, що змінилося між двома знімками (було -> стало)
+#   --compare-out FILE      зберегти результат --compare у FILE
 #   -h|--help
 
 set -u
@@ -25,13 +28,15 @@ CONFIGURE_WAZUH=0
 IMMUTABLE=0
 REPORT=""
 QUIET=0
+SNAPSHOT=""
+CMP_BEFORE=""; CMP_AFTER=""; CMP_OUT=""
 
 RULES_FILE="/etc/audit/rules.d/50-seclogging.rules"
 JOURNALD_DROPIN="/etc/systemd/journald.conf.d/50-seclogging.conf"
 MARK_BEGIN="<!-- SecLogging BEGIN (managed by set-security-logging.sh) -->"
 MARK_END="<!-- SecLogging END -->"
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -42,6 +47,9 @@ while [ $# -gt 0 ]; do
         --immutable) IMMUTABLE=1 ;;
         --report) REPORT="${2:-}"; shift ;;
         --quiet) QUIET=1 ;;
+        --snapshot) SNAPSHOT="${2:-}"; shift ;;
+        --compare) CMP_BEFORE="${2:-}"; CMP_AFTER="${3:-}"; shift 2 ;;
+        --compare-out) CMP_OUT="${2:-}"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Невідомий параметр: $1" >&2; usage; exit 64 ;;
     esac
@@ -573,10 +581,87 @@ do_wazuh() {
     else result wazuh localfile Changed "додано $list; перезапустіть wazuh-agent вручну"; fi
 }
 
+# ------------------------------------------------------------------ знімки стану "до / після"
+
+# Рядки "Область<TAB>Елемент<TAB>Значення" - усе, що скрипт перевіряє або змінює
+state_snapshot() {
+    local k v f
+    if have auditctl; then
+        printf 'auditd\tпакет\t%s\n' "$( { dpkg-query -W -f='${Version}' auditd 2>/dev/null || rpm -q audit 2>/dev/null || auditctl -v 2>/dev/null; } | head -1)"
+        printf 'auditd\tслужба\t%s\n' "$(svc_active auditd && echo працює || echo 'не працює')"
+        v=$(auditctl -s 2>/dev/null | awk '/^enabled/{print $2}'); printf 'auditd\tаудит ядра (enabled)\t%s\n' "${v:-(невідомо)}"
+        printf 'auditd\tактивних правил\t%s\n' "$(auditctl -l 2>/dev/null | grep -c '^-')"
+    else
+        printf 'auditd\tпакет\tне встановлено\n'
+    fi
+    for k in max_log_file num_logs max_log_file_action log_format space_left_action; do
+        v=$(get_kv /etc/audit/auditd.conf "$k"); printf 'auditd.conf\t%s\t%s\n' "$k" "${v:-(не задано)}"
+    done
+    for f in /etc/audit/rules.d/*.rules; do
+        [ -f "$f" ] && printf 'auditd.rules\t%s\t%s\n' "$f" "$(sha256sum "$f" | cut -c1-16) ($(grep -cE '^-(w|a) ' "$f") правил)"
+    done
+    if [ "$HAS_SYSTEMD" -eq 1 ]; then
+        v=$(journald_value Storage); printf 'journald\tStorage\t%s\n' "${v:-auto (за замовчуванням)}"
+        v=$(journald_value SystemMaxUse); printf 'journald\tSystemMaxUse\t%s\n' "${v:-(за замовчуванням)}"
+        printf 'journald\t/var/log/journal\t%s\n' "$([ -d /var/log/journal ] && echo є || echo немає)"
+    fi
+    printf 'syslog\tдемон\t%s\n' "$(if have rsyslogd; then echo rsyslog; elif have syslog-ng; then echo syslog-ng; else echo немає; fi)"
+    for f in /var/log/auth.log /var/log/secure /var/log/messages /var/log/syslog; do
+        [ -f "$f" ] && printf 'syslog\t%s\tє\n' "$f"
+    done
+    if [ -f /var/ossec/etc/ossec.conf ]; then
+        printf 'wazuh\tагент\t%s\n' "$(svc_active wazuh-agent && echo працює || echo 'не працює')"
+        cat /var/ossec/etc/ossec.conf /var/ossec/etc/shared/agent.conf 2>/dev/null | grep -oE '<location>[^<]+</location>' \
+            | sed -E 's|</?location>||g' | sort -u | while IFS= read -r v; do printf 'wazuh\t%s\tзбирається\n' "$v"; done
+    else
+        printf 'wazuh\tагент\tне встановлено\n'
+    fi
+}
+
+save_snapshot() {
+    local out="$1"
+    mkdir -p "$(dirname "$out")"
+    {
+        printf '# SecLogging знімок стану; %s; %s; %s; скрипт %s\n' "$(host_name)" "$OS_NAME" "$(date '+%Y-%m-%d %H:%M:%S')" "$SCRIPT_VERSION"
+        printf '# Область\tЕлемент\tЗначення\n'
+        state_snapshot | LC_ALL=C sort
+    } > "$out"
+}
+
+# compare_snapshots BEFORE AFTER -> звіт "було -> стало"; повертає 0
+compare_snapshots() {
+    awk -F'\t' '
+        FNR==1 { hdr[++nf]=$0 }
+        /^#/ || NF<3 { next }
+        { k=$1 FS $2; v=$3; for(i=4;i<=NF;i++) v=v FS $i
+          if (NR==FNR) { b[k]=v } else { a[k]=v }; keys[k]=1 }
+        END {
+            n=0; for (k in keys) if (!(k in b) || !(k in a) || b[k]!=a[k]) ch[++n]=k
+            # сортування за ключем (область, елемент)
+            for (i=2;i<=n;i++){ t=ch[i]; j=i-1; while(j>0 && ch[j]>t){ch[j+1]=ch[j]; j--} ch[j+1]=t }
+            print "SecLogging: що змінилося"
+            print "До:    " hdr[1]; print "Після: " hdr[2]; print "Змін: " n
+            area=""
+            for (i=1;i<=n;i++) { split(ch[i], p, FS)
+                if (p[1]!=area) { area=p[1]; print ""; print "[" area "]" }
+                print "  " p[2]
+                print "      було:  " ((ch[i] in b) ? b[ch[i]] : "(не було)")
+                print "      стало: " ((ch[i] in a) ? a[ch[i]] : "(зникло)") }
+            if (!n) { print ""; print "Змін немає." }
+        }' "$1" "$2"
+}
+
 # ------------------------------------------------------------------ основна частина
 
 main() {
+    if [ -n "$CMP_BEFORE" ]; then
+        [ -f "$CMP_BEFORE" ] && [ -f "$CMP_AFTER" ] || { echo "Для --compare потрібні два наявні файли знімків" >&2; exit 64; }
+        if [ -n "$CMP_OUT" ]; then mkdir -p "$(dirname "$CMP_OUT")"; compare_snapshots "$CMP_BEFORE" "$CMP_AFTER" | tee "$CMP_OUT"
+        else compare_snapshots "$CMP_BEFORE" "$CMP_AFTER"; fi
+        exit 0
+    fi
     if [ "$(id -u)" -ne 0 ]; then echo "Запустіть від root (sudo)." >&2; exit 3; fi
+    if [ -n "$SNAPSHOT" ]; then detect_host; save_snapshot "$SNAPSHOT"; echo "Знімок стану: $SNAPSHOT"; exit 0; fi
     local started; started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     detect_host
     if [ "$QUIET" -eq 0 ]; then

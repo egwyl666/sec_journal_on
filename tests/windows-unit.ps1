@@ -308,6 +308,53 @@ foreach ($g in @(@{ File = 'windows'; Dc = $false }, @{ File = 'windows-dc'; Dc 
 }
 Assert (@($s.AuditPolicy | Where-Object { $_.Guid -like '0CCE9221-*' -and $_.Workstation -eq 0 -and $_.DomainController -eq 3 }).Count -eq 1) 'аудит Certification Services (AD CS) на серверах і DC'
 
+Write-Host 'Start-SecLogging: одна команда для будь-якої машини'
+$start = Join-Path $root 'windows/Start-SecLogging.ps1'
+$tok = $null; $err = $null
+$null = [System.Management.Automation.Language.Parser]::ParseFile($start, [ref]$tok, [ref]$err)
+Assert ($err.Count -eq 0) 'Start-SecLogging.ps1 без синтаксичних помилок'
+$sbText = [System.IO.File]::ReadAllText($start, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF)
+Assert ($null -ne [scriptblock]::Create($sbText)) 'створюється як scriptblock (як в однорядковій команді)'
+Import-ScriptFunctions $start
+$p = Get-StartPlan 1 ([version]'10.0.22631') $false $false $false $false '10.42'
+Assert ($p.Role -eq 'Workstation' -and -not $p.Gpo -and ($p.Local -join ' ') -eq '-Mode Local -ConfigureWazuh') 'Win10/11: лише локально, Sysmon сучасний'
+$p = Get-StartPlan 3 ([version]'6.1.7601') $false $false $false $false '10.42'
+Assert ($p.Legacy -and ($p.Local -join ' ') -eq '-Mode Local -AllowLegacySysmon -LegacySysmonVersion 10.42 -ConfigureWazuh' -and -not $p.Gpo) '2008 R2: Sysmon 10.42 для старих ОС'
+$p = Get-StartPlan 3 ([version]'6.1.7601') $false $false $false $true '10.42'
+Assert (($p.Local -join ' ') -eq '-Mode Local -SkipSysmon -ConfigureWazuh') '2008 R2 з -NoLegacySysmon: без Sysmon'
+$p = Get-StartPlan 2 ([version]'10.0.20348') $false $false $false $false '10.2'
+Assert ($p.Role -eq 'DomainController' -and ($p.Gpo -join ' ') -eq '-Mode Domain -NoBuild -SetDomainRootSacl -AllowLegacySysmon -LegacySysmonVersion 10.2') 'DC: локально + GPO + SACL для DCSync'
+$p = Get-StartPlan 2 ([version]'10.0.20348') $true $false $false $false '10.42'
+Assert (($p.Local -contains '-AuditOnly') -and ($p.Gpo -contains '-WhatIfGpo')) 'DC -AuditOnly: нічого не змінює, GPO лише -WhatIf'
+Assert ($null -eq (Get-StartPlan 2 ([version]'10.0.20348') $false $false $true $false '10.42').Gpo) 'DC -NoGpo: без GPO'
+Assert ((ConvertTo-ArgLine @('-File', 'C:\Program Files\x.ps1', '-Snapshot', 'C:\ProgramData\SecLogging\a.tsv')) -eq '-File "C:\Program Files\x.ps1" -Snapshot C:\ProgramData\SecLogging\a.tsv') 'аргументи дочірнього процесу з пробілами - у лапках'
+
+Write-Host 'Знімки стану "до / після"'
+Import-ScriptFunctions $main
+$before = @('# SecLogging знімок стану; PC1', "# Область`tЕлемент`tЗначення",
+    "AuditPolicy`tLogon`tУспіх", "AuditPolicy`tProcess Creation`tБез аудиту",
+    "EventLog`tSecurity`tувімкнено=True; розмір=20 МБ; режим=Circular",
+    "Registry`tSOFTWARE\x\EnableScriptBlockLogging`t(не задано)", "Sysmon`tСлужба`tне встановлено", "Wazuh`tsecurity`tзбирається")
+$after = @('# SecLogging знімок стану; PC1', "# Область`tЕлемент`tЗначення",
+    "AuditPolicy`tLogon`tУспіх і відмова", "AuditPolicy`tProcess Creation`tУспіх",
+    "EventLog`tSecurity`tувімкнено=True; розмір=768 МБ; режим=Circular",
+    "Registry`tSOFTWARE\x\EnableScriptBlockLogging`t1", "Sysmon`tСлужба`tSysmon64 (Running)", "Sysmon`tВерсія`t15.15",
+    "Wazuh`tsecurity`tзбирається", "Wazuh`tmicrosoft-windows-sysmon/operational`tзбирається")
+$ch = @(Compare-StateSnapshot $before $after)
+$byItem = @{}; foreach ($c in $ch) { $byItem[$c.Item] = $c }
+Assert ($ch.Count -eq 7) "знайдено 7 змін, незмінене пропущено ($($ch.Count))"
+Assert ($byItem['Logon'].Before -eq 'Успіх' -and $byItem['Logon'].After -eq 'Успіх і відмова') 'аудит: було -> стало'
+Assert ($byItem['Security'].After -like '*768 МБ*') 'розмір журналу'
+Assert ($byItem['Версія'].Before -eq '(не було)' -and $byItem['microsoft-windows-sysmon/operational'].Before -eq '(не було)') 'нові елементи позначено "(не було)"'
+Assert (@($ch | Where-Object { $_.Area -eq 'Wazuh' -and $_.Item -eq 'security' }).Count -eq 0) 'незмінений рядок не потрапляє у звіт'
+Assert (@(Compare-StateSnapshot $after $after).Count -eq 0) 'однакові знімки - змін немає'
+$tb = [IO.Path]::GetTempFileName(); $ta = [IO.Path]::GetTempFileName(); $to = Join-Path ([IO.Path]::GetTempPath()) ('changes-' + [guid]::NewGuid() + '.txt')
+[IO.File]::WriteAllLines($tb, [string[]]$before); [IO.File]::WriteAllLines($ta, [string[]]$after)
+$n = Write-StateComparison $tb $ta $to 6>$null
+$txt = [IO.File]::ReadAllText($to); $csvText = [IO.File]::ReadAllText([IO.Path]::ChangeExtension($to, '.csv'))
+Assert ($n -eq 7 -and $txt -match 'Змін: 7' -and $txt -match 'було:  Успіх' -and $csvText -match '^\W*Область;Елемент;Було;Стало') 'звіт .txt і .csv записано'
+Remove-Item $tb, $ta, $to, ([IO.Path]::ChangeExtension($to, '.csv')) -Force
+
 Write-Host ''
 Write-Host "Пройдено: $script:passed  Не пройдено: $script:failed"
 if ($script:failed) { exit 1 }

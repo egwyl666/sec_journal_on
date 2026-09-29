@@ -14,6 +14,7 @@ Every script has a read-only mode (`-AuditOnly` / `--check`) that shows what it 
 ```
 windows/Set-SecurityLogging.ps1   single script for any Windows (WS / Server / DC), PowerShell 2.0+
 windows/New-SecLoggingGpo.ps1     domain GPO add-on (run on a DC)
+windows/Start-SecLogging.ps1      one command for anyone: download, detect, configure, before/after report
 windows/Install-SecLogging.ps1    automation: download -> build package -> install / share / GPO
 linux/set-security-logging.sh     single script for any Linux (deb, rpm, SUSE, Arch, Alpine families; see the table)
 linux/install.sh                  automation: offline bundle (build) and install (online or --from)
@@ -26,6 +27,53 @@ tests/                            tests (pwsh + docker)
 
 > Help text, comments and console messages inside the scripts are in Ukrainian. Machine-readable values stay in English: statuses (`OK`, `Changed`, `WouldChange`, `Warning`, `Error`, `Skipped`), JSON keys, parameter names, log channel names. This keeps SIEM rules and filters simple.
 > The `.ps1` files are saved as **UTF-8 with BOM**. Without the BOM, Windows PowerShell 5.1/2.0 reads the Cyrillic text incorrectly. If you edit the scripts, keep the BOM.
+
+## One command (no decisions needed)
+
+Open **PowerShell or cmd as administrator** (Windows) or a root shell (Linux), paste one line, and wait for `DONE`. The machine needs internet access.
+
+**Windows** (10/11, Server 2008 R2 … 2025, domain controllers):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; $w=New-Object Net.WebClient; $w.Encoding=[Text.Encoding]::UTF8; & ([scriptblock]::Create($w.DownloadString('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1').TrimStart([char]0xFEFF)))"
+```
+
+**Linux** (any distribution from the table below):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh | sudo bash
+```
+
+What happens:
+
+1. The scripts are downloaded from GitHub.
+2. The machine type is detected: workstation, server, domain controller, old OS (2008 / 2008 R2 / Win7), Linux distribution.
+3. A snapshot of the current state is saved ("before").
+4. Everything that is missing is enabled: event logs and their sizes, audit policy, PowerShell logging, Sysmon (Windows), auditd and journald (Linux), Wazuh collection if the agent is installed. On a **domain controller** the domain GPOs are also created, so every domain machine configures itself at boot, and DCSync auditing is enabled.
+5. A second snapshot is saved ("after"), and **everything that changed is written as "before → after"**.
+
+Results:
+
+| | Windows | Linux |
+|---|---|---|
+| What changed (before → after) | `C:\ProgramData\SecLogging\changes\<time>-changes.txt` (+ `.csv` for Excel) | `/var/log/seclogging/changes/<time>-changes.txt` |
+| Full snapshots | `...\changes\<time>-before.tsv`, `<time>-after.tsv` | same folder |
+| Detailed report | `C:\ProgramData\SecLogging\last-report.json` | `/var/log/seclogging/last-report.json` |
+
+Running it again is safe: only what is missing changes, and a second run reports `Змін немає` (no changes).
+
+Check only, change nothing:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; $w=New-Object Net.WebClient; $w.Encoding=[Text.Encoding]::UTF8; & ([scriptblock]::Create($w.DownloadString('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1').TrimStart([char]0xFEFF))) -AuditOnly"
+```
+```bash
+curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh | sudo bash -s -- --check
+```
+
+No internet on the machine: download `https://github.com/egwyl666/sec_journal_on/archive/HEAD.zip` elsewhere, copy it over and run `powershell -ExecutionPolicy Bypass -File <unpacked>\windows\Start-SecLogging.ps1 -Source <path to the zip>` (Linux: the offline bundle, see below).
+
+To compare any two snapshots later: `Set-SecurityLogging.ps1 -CompareBefore a.tsv -CompareAfter b.tsv -CompareOut changes.txt` / `set-security-logging.sh --compare a.tsv b.tsv`.
 
 ## Quick start (automated)
 
@@ -345,7 +393,7 @@ Alerts worth creating right away:
 |---|---|---|
 | Syntax of both `.ps1` files, PSScriptAnalyzer (Warning/Error) | pwsh 7 on Linux | clean |
 | PowerShell 2.0: no PS3+ constructs | grep + PSUseCompatibleSyntax | clean |
-| Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op, PowerShell 2.0 fallbacks | pwsh 7 | 90/90 |
+| Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op, PowerShell 2.0 fallbacks | pwsh 7 | 109/109 |
 | `tests/linux-docker.sh`: check → apply → second apply with no changes | Ubuntu 24.04 / 20.04, Mint 21.3, Oracle Linux 9 with real auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch with a stub auditctl (their mirrors were unreachable from the sandbox) | pass (13 distributions) |
 | auditd installed by the script itself through the package manager | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | pass |
 | Server 2008 R2 lab: Sysmon 10.42 with the schema 4.22 config | VM, PowerShell 2.0 | running, events logged |

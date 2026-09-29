@@ -82,6 +82,19 @@
     Разом із -BuildPackage: прийняти Sysmon.zip, хеш якого відрізняється від
     закріпленого (новий реліз Microsoft). Підпис усе одно перевіряється.
 
+.PARAMETER Snapshot
+    Записати знімок поточного стану (аудит, журнали, реєстр, Sysmon, Wazuh, GPO) у файл і вийти.
+    Нічого не змінює. Знімки "до" і "після" порівнюються через -CompareBefore/-CompareAfter.
+
+.PARAMETER CompareBefore
+    Знімок "до" для порівняння (разом з -CompareAfter). Звіт про зміни - у -CompareOut і на екран.
+
+.PARAMETER CompareAfter
+    Знімок "після" для порівняння.
+
+.PARAMETER CompareOut
+    Файл звіту про зміни (.txt; поруч записується .csv для Excel).
+
 .PARAMETER ExportSettings
     Повернути таблицю налаштувань (використовує New-SecLoggingGpo.ps1).
 
@@ -114,7 +127,11 @@ param(
     [switch]$Quiet,
     [string]$BuildPackage,
     [switch]$AcceptNewSysmon,
-    [switch]$ExportSettings
+    [switch]$ExportSettings,
+    [string]$Snapshot,
+    [string]$CompareBefore,
+    [string]$CompareAfter,
+    [string]$CompareOut
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1025,6 +1042,140 @@ function Invoke-Sysmon {
 }
 
 #endregion
+#region ---------------------------------------------------------------- знімки стану "до / після"
+
+function Get-StateSnapshot {
+    # Рядки "Область<TAB>Елемент<TAB>Значення" - усе, що скрипт перевіряє або змінює.
+    param($Settings)
+    $lines = @()
+    $names = @{}; foreach ($a in $Settings.AuditPolicy) { $names[$a.Guid.ToUpper()] = $a.Name }
+    try {
+        $map = Get-AuditPolicyMap
+        foreach ($g in $map.Keys) {
+            $n = $names[$g]; if (-not $n) { $n = "{$g}" }
+            $lines += "AuditPolicy`t$n`t$(Format-AuditValue $map[$g])"
+        }
+    }
+    catch { $lines += "AuditPolicy`t(помилка)`t$($_.Exception.Message)" }
+    foreach ($c in $Settings.Channels) {
+        $st = Get-ChannelState $c.N
+        if ($st.Exists) { $v = 'увімкнено={0}; розмір={1} МБ; режим={2}' -f $st.Enabled, [math]::Round([double]$st.MaxBytes / 1MB), $st.Mode }
+        else { $v = 'немає в цій ОС' }
+        $lines += "EventLog`t$($c.N)`t$v"
+    }
+    $reg = @($Settings.Registry)
+    $t = 'SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription'
+    $reg += @{ Path = $t; Name = 'EnableTranscripting' }, @{ Path = $t; Name = 'OutputDirectory' }
+    $ca = Get-RegValue 'SYSTEM\CurrentControlSet\Services\CertSvc\Configuration' 'Active'
+    if ($ca) { $reg += @{ Path = "SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$ca"; Name = 'AuditFilter' } }
+    foreach ($r in $reg) {
+        $v = Get-RegValue $r.Path $r.Name; if ($null -eq $v) { $v = '(не задано)' }
+        $lines += "Registry`t$($r.Path)\$($r.Name)`t$v"
+    }
+    $sm = Get-SysmonState
+    if ($sm.Installed) {
+        $lines += "Sysmon`tСлужба`t$($sm.ServiceName) ($($sm.State))"
+        $lines += "Sysmon`tВерсія`t$($sm.Version)"
+    }
+    else { $lines += "Sysmon`tСлужба`tне встановлено" }
+    $cfg = $sm.AppliedConfigSha256; if (-not $cfg) { $cfg = '(невідомо)' }
+    $lines += "Sysmon`tКонфіг (SHA256)`t$cfg"
+    $svc = $null
+    foreach ($n in @('WazuhSvc', 'OssecSvc')) { $svc = Get-WmiObject Win32_Service -Filter "Name='$n'"; if ($svc) { break } }
+    if ($svc -and [string]$svc.PathName -match '^"?([^"]+?\.exe)') {
+        $dir = Split-Path -Parent $Matches[1]
+        $lines += "Wazuh`tАгент`t$($svc.State)"
+        foreach ($l in @(Get-WazuhLocations @((Join-Path $dir 'ossec.conf'), (Join-Path $dir 'shared\agent.conf')) | Sort-Object -Unique)) { $lines += "Wazuh`t$l`tзбирається" }
+    }
+    else { $lines += "Wazuh`tАгент`tне встановлено" }
+    # GPO (лише там, де є модуль GroupPolicy - зазвичай DC)
+    if (Get-Module -ListAvailable -Name GroupPolicy -ErrorAction SilentlyContinue) {
+        try {
+            Import-Module GroupPolicy -ErrorAction Stop
+            foreach ($g in @('SEC-Logging-Baseline', 'SEC-Logging-DomainControllers')) {
+                $o = Get-GPO -Name $g -ErrorAction SilentlyContinue
+                if ($o) { $lines += "GPO`t$g`tверсія комп'ютера $($o.Computer.DSVersion), змінено $($o.ModificationTime.ToString('yyyy-MM-dd HH:mm'))" }
+                else { $lines += "GPO`t$g`tнемає" }
+            }
+        }
+        catch { $lines += "GPO`t(помилка)`t$($_.Exception.Message)" }
+    }
+    $lines | Sort-Object
+}
+
+function Save-StateSnapshot {
+    param([string]$Path, [string[]]$Lines, $HostInfo)
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $head = @(('# SecLogging знімок стану; {0}; {1} {2}; {3:yyyy-MM-dd HH:mm:ss}; скрипт {4}' -f $env:COMPUTERNAME, $HostInfo.OSCaption, $HostInfo.OSVersion, (Get-Date), $ScriptVersion),
+        "# Область`tЕлемент`tЗначення")
+    [System.IO.File]::WriteAllLines($Path, [string[]]($head + $Lines), (New-Object System.Text.UTF8Encoding($true)))
+}
+
+function Read-StateSnapshot {
+    # -> @{ 'Область<TAB>Елемент' = Значення }
+    param([string[]]$Lines)
+    $h = @{}
+    foreach ($l in $Lines) {
+        if (-not $l -or $l.StartsWith('#')) { continue }
+        $p = $l.Split("`t")
+        if ($p.Count -lt 3) { continue }
+        $h["$($p[0])`t$($p[1])"] = ($p[2..($p.Count - 1)] -join "`t")
+    }
+    $h
+}
+
+function Compare-StateSnapshot {
+    # -> масив @{ Area; Item; Before; After }, відсортований за областю й елементом
+    param([string[]]$Before, [string[]]$After)
+    $b = Read-StateSnapshot $Before; $a = Read-StateSnapshot $After
+    $keys = @($b.Keys) + @($a.Keys) | Sort-Object -Unique
+    $out = @()
+    foreach ($k in $keys) {
+        $vb = $b[$k]; $va = $a[$k]
+        if ($vb -eq $va) { continue }
+        if ($null -eq $vb) { $vb = '(не було)' }
+        if ($null -eq $va) { $va = '(зникло)' }
+        $p = $k.Split("`t")
+        $out += @{ Area = $p[0]; Item = $p[1]; Before = $vb; After = $va }
+    }
+    $out
+}
+
+function Write-StateComparison {
+    # Текстовий звіт (і CSV поруч) про зміни між двома знімками; повертає кількість змін
+    param([string]$BeforePath, [string]$AfterPath, [string]$OutPath)
+    $enc = New-Object System.Text.UTF8Encoding($true)
+    $before = [System.IO.File]::ReadAllLines($BeforePath); $after = [System.IO.File]::ReadAllLines($AfterPath)
+    $changes = @(Compare-StateSnapshot $before $after)
+    $text = @(
+        'SecLogging: що змінилося',
+        ('До:    {0}' -f ($before | Select-Object -First 1)),
+        ('Після: {0}' -f ($after | Select-Object -First 1)),
+        ('Змін: {0}' -f $changes.Count),
+        ''
+    )
+    $area = ''
+    foreach ($c in $changes) {
+        if ($c.Area -ne $area) { $area = $c.Area; $text += ''; $text += "[$area]" }
+        $text += ('  {0}' -f $c.Item)
+        $text += ('      було:  {0}' -f $c.Before)
+        $text += ('      стало: {0}' -f $c.After)
+    }
+    if (-not $changes.Count) { $text += 'Змін немає.' }
+    if ($OutPath) {
+        $dir = Split-Path -Parent $OutPath
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        [System.IO.File]::WriteAllLines($OutPath, [string[]]$text, $enc)
+        $csv = @('Область;Елемент;Було;Стало')
+        foreach ($c in $changes) { $csv += (@($c.Area, $c.Item, $c.Before, $c.After) | ForEach-Object { '"' + ([string]$_ -replace '"', '""') + '"' }) -join ';' }
+        [System.IO.File]::WriteAllLines([System.IO.Path]::ChangeExtension($OutPath, '.csv'), [string[]]$csv, $enc)
+    }
+    foreach ($l in $text) { Write-Host $l }
+    $changes.Count
+}
+
+#endregion
 #region ---------------------------------------------------------------- Wazuh
 
 function Get-WazuhLocations {
@@ -1217,7 +1368,18 @@ if ($BuildPackage) {
     catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 2 }
 }
 
+if ($CompareBefore -or $CompareAfter) {
+    if (-not ($CompareBefore -and $CompareAfter)) { Write-Host 'Потрібні обидва: -CompareBefore і -CompareAfter.' -ForegroundColor Red; exit 64 }
+    try { $null = Write-StateComparison $CompareBefore $CompareAfter $CompareOut; exit 0 }
+    catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 2 }
+}
+
 if (-not (Test-IsAdmin)) { Write-Error 'Запустіть від імені адміністратора (з підвищеними правами).'; exit 3 }
+
+if ($Snapshot) {
+    try { Save-StateSnapshot $Snapshot (Get-StateSnapshot (Get-SecLoggingSettings)) (Get-HostInfo); Write-Host "Знімок стану: $Snapshot"; exit 0 }
+    catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 2 }
+}
 
 $mutex = New-Object System.Threading.Mutex($false, 'Global\SecLoggingRun')
 if (-not $mutex.WaitOne(0)) { Write-Host 'Інший запуск Set-SecurityLogging уже виконується, вихід.'; exit 0 }
