@@ -348,6 +348,10 @@ Assert ($byItem['Security'].After -like '*768 МБ*') 'розмір журнал
 Assert ($byItem['Версія'].Before -eq '(не було)' -and $byItem['microsoft-windows-sysmon/operational'].Before -eq '(не було)') 'нові елементи позначено "(не було)"'
 Assert (@($ch | Where-Object { $_.Area -eq 'Wazuh' -and $_.Item -eq 'security' }).Count -eq 0) 'незмінений рядок не потрапляє у звіт'
 Assert (@(Compare-StateSnapshot $after $after).Count -eq 0) 'однакові знімки - змін немає'
+$sub = @(Get-AuditSubcategoryNames)
+Assert ($sub.Count -eq 59 -and @($sub | ForEach-Object { $_.Split('|')[0] } | Sort-Object -Unique).Count -eq 59) 'назви всіх 59 підкатегорій аудиту для знімка (замість GUID)'
+$known = @{}; foreach ($x in $sub) { $kv = $x.Split('|'); $known[$kv[0]] = $kv[1] }
+Assert (@($s.AuditPolicy | Where-Object { $known[$_.Guid.Substring(4, 4)] -ne $_.Name }).Count -eq 0) 'назви в таблиці аудиту скрипта збігаються з довідником'
 $tb = [IO.Path]::GetTempFileName(); $ta = [IO.Path]::GetTempFileName(); $to = Join-Path ([IO.Path]::GetTempPath()) ('changes-' + [guid]::NewGuid() + '.txt')
 [IO.File]::WriteAllLines($tb, [string[]]$before); [IO.File]::WriteAllLines($ta, [string[]]$after)
 $n = Write-StateComparison $tb $ta $to 6>$null
@@ -363,6 +367,19 @@ foreach ($rd in 'README.md', 'README.uk.md') {
     $t = $null; $e = $null
     $null = [System.Management.Automation.Language.Parser]::ParseInput($inner, [ref]$t, [ref]$e)
     Assert ($e.Count -eq 0) "${rd}: внутрішня команда розбирається без помилок"
+}
+
+Write-Host 'Змінні рівня скрипта не перекриваються (PowerShell не розрізняє регістр імен)'
+foreach ($f in 'windows/Set-SecurityLogging.ps1', 'windows/Start-SecLogging.ps1', 'windows/Install-SecLogging.ps1', 'windows/lab/Test-LegacySysmon.ps1') {
+    $tk = $null; $er = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root $f), [ref]$tk, [ref]$er)
+    $vars = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.IsScript }, $true) | ForEach-Object { ($_.VariablePath.UserPath -replace '^[^:]+:', '').ToLower() } | Sort-Object -Unique)
+    $bad = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true) | Where-Object {
+            $l = $_.Left; if ($l -is [System.Management.Automation.Language.ConvertExpressionAst]) { $l = $l.Child }
+            $inFn = $false; $pp = $_.Parent; while ($pp) { if ($pp -is [System.Management.Automation.Language.FunctionDefinitionAst]) { $inFn = $true; break }; $pp = $pp.Parent }
+            (-not $inFn) -and $l -is [System.Management.Automation.Language.VariableExpressionAst] -and -not $l.VariablePath.IsScript -and ($vars -contains $l.VariablePath.UserPath.ToLower())
+        } | ForEach-Object { '{0} (рядок {1})' -f $_.Left.Extent.Text, $_.Extent.StartLineNumber })
+    Assert ($bad.Count -eq 0) "${f}: немає `$x = ... поверх `$Script:x [$($bad -join ', ')]"
 }
 
 Write-Host ''

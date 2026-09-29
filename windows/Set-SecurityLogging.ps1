@@ -189,7 +189,7 @@ function Write-Host {
 
 #endregion
 
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.1.0'
 $ScriptPath = $MyInvocation.MyCommand.Path
 $ScriptDir = Split-Path -Parent $ScriptPath
 $StateRegPath = 'SOFTWARE\SecLogging'
@@ -1044,11 +1044,32 @@ function Invoke-Sysmon {
 #endregion
 #region ---------------------------------------------------------------- знімки стану "до / після"
 
+function Get-AuditSubcategoryNames {
+    # Усі підкатегорії Advanced Audit Policy (суфікс GUID 0CCExxxx-69AE-11D9-BED3-505054503030 | англійська назва)
+    @('9210|Security State Change', '9211|Security System Extension', '9212|System Integrity', '9213|IPsec Driver', '9214|Other System Events',
+        '9215|Logon', '9216|Logoff', '9217|Account Lockout', '9218|IPsec Main Mode', '9219|IPsec Quick Mode', '921A|IPsec Extended Mode',
+        '921B|Special Logon', '921C|Other Logon/Logoff Events', '921D|File System', '921E|Registry', '921F|Kernel Object', '9220|SAM',
+        '9221|Certification Services', '9222|Application Generated', '9223|Handle Manipulation', '9224|File Share',
+        '9225|Filtering Platform Packet Drop', '9226|Filtering Platform Connection', '9227|Other Object Access Events',
+        '9228|Sensitive Privilege Use', '9229|Non Sensitive Privilege Use', '922A|Other Privilege Use Events', '922B|Process Creation',
+        '922C|Process Termination', '922D|DPAPI Activity', '922E|RPC Events', '922F|Audit Policy Change', '9230|Authentication Policy Change',
+        '9231|Authorization Policy Change', '9232|MPSSVC Rule-Level Policy Change', '9233|Filtering Platform Policy Change',
+        '9234|Other Policy Change Events', '9235|User Account Management', '9236|Computer Account Management', '9237|Security Group Management',
+        '9238|Distribution Group Management', '9239|Application Group Management', '923A|Other Account Management Events',
+        '923B|Directory Service Access', '923C|Directory Service Changes', '923D|Directory Service Replication',
+        '923E|Detailed Directory Service Replication', '923F|Credential Validation', '9240|Kerberos Service Ticket Operations',
+        '9241|Other Account Logon Events', '9242|Kerberos Authentication Service', '9243|Network Policy Server', '9244|Detailed File Share',
+        '9245|Removable Storage', '9246|Central Policy Staging', '9247|User / Device Claims', '9248|Plug and Play Events',
+        '9249|Group Membership', '924A|Token Right Adjusted Events')
+}
+
 function Get-StateSnapshot {
     # Рядки "Область<TAB>Елемент<TAB>Значення" - усе, що скрипт перевіряє або змінює.
     param($Settings)
     $lines = @()
-    $names = @{}; foreach ($a in $Settings.AuditPolicy) { $names[$a.Guid.ToUpper()] = $a.Name }
+    $names = @{}
+    foreach ($pair in (Get-AuditSubcategoryNames)) { $kv = $pair.Split('|'); $names[('0CCE{0}-69AE-11D9-BED3-505054503030' -f $kv[0])] = $kv[1] }
+    foreach ($a in $Settings.AuditPolicy) { $names[$a.Guid.ToUpper()] = $a.Name }
     try {
         $map = Get-AuditPolicyMap
         foreach ($g in $map.Keys) {
@@ -1420,19 +1441,21 @@ try {
     }
 
     $summary = 'OK={0} Changed={1} WouldChange={2} Warning={3} Error={4} Skipped={5}' -f $Script:Counts.OK, $Script:Counts.Changed, $Script:Counts.WouldChange, $Script:Counts.Warning, $Script:Counts.Error, $Script:Counts.Skipped
-    $report = New-OD
-    $report.Tool = 'Set-SecurityLogging'
-    $report.Version = $ScriptVersion
-    $report.Mode = $(if ($AuditOnly) { 'AuditOnly' } else { 'Apply' })
-    $report.Started = $started
-    $report.Finished = Get-Date
-    $report.Host = $hostInfo
-    $report.Role = $roleName
-    $report.Source = $(if ($SourcePath) { $SourcePath } else { 'online' })
-    $report.Summary = $Script:Counts
-    $report.Results = $Script:Report
+    # Не $report: у PowerShell імена змінних без урахування регістру, і на рівні скрипта
+    # $report - це той самий $Script:Report (список результатів). Звідси колись звіт "сам у собі".
+    $reportDoc = New-OD
+    $reportDoc.Tool = 'Set-SecurityLogging'
+    $reportDoc.Version = $ScriptVersion
+    $reportDoc.Mode = $(if ($AuditOnly) { 'AuditOnly' } else { 'Apply' })
+    $reportDoc.Started = $started
+    $reportDoc.Finished = Get-Date
+    $reportDoc.Host = $hostInfo
+    $reportDoc.Role = $roleName
+    $reportDoc.Source = $(if ($SourcePath) { $SourcePath } else { 'online' })
+    $reportDoc.Summary = $Script:Counts
+    $reportDoc.Results = $Script:Report
     if (-not $ReportPath) { $ReportPath = Join-Path $WorkDir ('report-{0:yyyyMMdd-HHmmss}.json' -f $started) }
-    try { $json = ConvertTo-JsonString $report }
+    try { $json = ConvertTo-JsonString $reportDoc }
     catch {
         Write-Host "Не вдалося сформувати JSON-звіт: $($_.Exception.Message)" -ForegroundColor Yellow
         $json = '{ "Tool": "Set-SecurityLogging", "Error": ' + (Format-JsonText ([string]$_.Exception.Message)) + ', "Summary": ' + (Format-JsonText $summary) + ' }'
