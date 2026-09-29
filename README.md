@@ -72,13 +72,13 @@ curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/
 # from a clone
 sudo ./linux/install.sh --check                      # check only
 sudo ./linux/install.sh --configure-wazuh            # install online
-sudo ./linux/install.sh build --with-sysmon          # offline bundle for this distro/version/arch
-sudo ./seclogging-bundle-*/install.sh --from ./seclogging-bundle-ubuntu-22.04-x86_64 --with-sysmon   # on the offline host
+sudo ./linux/install.sh build                        # offline bundle for this distro/version/arch
+sudo ./seclogging-bundle-*/install.sh --from ./seclogging-bundle-ubuntu-22.04-x86_64   # on the offline host
 ```
 
 `build` produces a bundle folder with:
 - both scripts;
-- `auditd` and `sysmon` packages together with their **full dependency tree**;
+- the `auditd` package together with its **full dependency tree**;
 - `SHA256SUMS`;
 - `bundle.info`, which records the distro, version and architecture it was built for.
 
@@ -179,7 +179,7 @@ Sometimes a GPO already sets smaller log sizes or weaker audit settings than our
 **Event logs.** Disabled logs are enabled. Sizes only grow. Retention is set to *Overwrite events as needed*, so logs never stop or fill the disk.
 
 | Class | Logs | WS | Server | DC |
-|---|---|---|---|---|
+|---|---|---|---|
 | Security | Security | 768 MB | 1.5 GB | 3 GB |
 | Sysmon | Microsoft-Windows-Sysmon/Operational | 512 MB | 1 GB | 1.5 GB |
 | PowerShell | PowerShell/Operational, Windows PowerShell, PowerShellCore/Operational | 384 MB | 768 MB | 1 GB |
@@ -277,7 +277,7 @@ SwiftOnSecurity `sysmonconfig-export.xml`, pinned to commit `1836897` (SHA256 in
 ```bash
 sudo ./linux/set-security-logging.sh --check          # report only
 sudo ./linux/set-security-logging.sh                  # apply
-sudo ./linux/set-security-logging.sh --with-sysmon --configure-wazuh
+sudo ./linux/set-security-logging.sh --configure-wazuh
 ```
 
 | What | How |
@@ -287,7 +287,6 @@ sudo ./linux/set-security-logging.sh --with-sysmon --configure-wazuh
 | Rules | `/etc/audit/rules.d/50-seclogging.rules`: identity, sudoers, PAM, SSH, cron/at/systemd/rc/profile, ld.so.preload, kernel modules, hostname, time, ptrace injection, mounts, execve in user sessions (key `audit-wazuh-c` for the stock Wazuh rules), execve by web server accounts (`webshell`). `-w` lines are written only if the path exists. If immutable mode (`-e 2`) is on, the script warns that a reboot is needed. `--immutable` adds `-e 2` itself |
 | journald | `Storage=persistent`, `SystemMaxUse` 1G (WS) / 2G (server) via a drop-in, only increased |
 | Auth log | checks for rsyslog and the auth log actually present (`/var/log/auth.log`, `/var/log/secure`, otherwise the family default), and that logrotate keeps at least 7 days |
-| Sysmon for Linux | `--with-sysmon`: installs from packages.microsoft.com (GPG-signed) or offline via `--sysmon-package-dir DIR` (a `SHA256SUMS` file is required). Uses a built-in config: processes, network except loopback, file creation in persistence locations |
 | Wazuh | checks the agent and whether audit/auth logs are collected. With `--configure-wazuh`, appends a managed block to `ossec.conf` |
 
 The report goes to `/var/log/seclogging/last-report.json`, and a summary line is sent to syslog (tag `seclogging`).
@@ -296,25 +295,20 @@ The report goes to `/var/log/seclogging/last-report.json`, and a summary line is
 
 One script for all of them: it checks what the host is and picks the package manager, package names, log paths and service commands itself. Nothing needs to be told about the distribution.
 
-| Family | Distributions | Package manager | Offline bundle (`install.sh build`) | Sysmon for Linux |
-|---|---|---|---|---|
-| deb | Ubuntu, Debian, Mint, Astra, Pop!_OS, Kali and other derivatives | apt | yes | Ubuntu 18.04+, Debian 10+, and derivatives via their base |
-| rpm | RHEL, CentOS 7/8/Stream, Rocky, Alma, Oracle, Fedora, Amazon Linux | dnf / yum | yes | RHEL-compatible 7+ and Fedora (kernel ≥ 4.15, so not CentOS 7) |
-| suse | SLES, openSUSE Leap/Tumbleweed | zypper | no (online only) | SLES / Leap 15 |
-| arch | Arch, Manjaro, EndeavourOS | pacman | no (online only) | no |
-| alpine | Alpine (OpenRC, needs `apk add bash`) | apk | no (online only) | no |
-| other | anything with `/etc/os-release` | none | no | no |
+| Family | Distributions | Package manager | Offline bundle (`install.sh build`) |
+|---|---|---|---|
+| deb | Ubuntu, Debian, Mint, Astra, Pop!_OS, Kali and other derivatives | apt | yes |
+| rpm | RHEL, CentOS 7/8/Stream, Rocky, Alma, Oracle, Fedora, Amazon Linux | dnf / yum | yes |
+| suse | SLES, openSUSE Leap/Tumbleweed | zypper | no (online only) |
+| arch | Arch, Manjaro, EndeavourOS | pacman | no (online only) |
+| alpine | Alpine (OpenRC, needs `apk add bash`) | apk | no (online only) |
+| other | anything with `/etc/os-release` | none | no |
 
 On an unknown distribution auditd must already be installed. The script then configures everything else and reports a warning instead of installing packages.
 
 CentOS 7 and 8 are end-of-life: their default repositories no longer work. The script says so and suggests `vault.centos.org` or the offline bundle.
 
-**Is Sysmon for Linux worth it?** Moderately. auditd remains the foundation. Sysmon adds network connections tied to processes, which is noisy and awkward with auditd, and the same event schema as Windows. The downsides:
-- it needs eBPF (kernel ≥ 4.15);
-- the package is not in the distribution repositories;
-- events arrive in syslog as XML, and **Wazuh needs extra decoders** for them.
-
-That is why it is off by default. Try it on a couple of servers and look at the event volume first.
+**Why no Sysmon for Linux.** The built-in tools already cover what matters: auditd records process execution with the full command line and user, file and configuration changes, kernel modules and privilege escalation, and journald/syslog cover logins, sudo and services. Wazuh parses all of this out of the box. Sysmon for Linux would add another agent with an eBPF sensor (kernel ≥ 4.15), packages from outside the distribution repositories, and XML events that Wazuh cannot decode without custom decoders.
 
 ---
 
@@ -356,8 +350,7 @@ Alerts worth creating right away:
 | auditd installed by the script itself through the package manager | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | pass |
 | Server 2008 R2 lab: Sysmon 10.42 with the schema 4.22 config | VM, PowerShell 2.0 | running, events logged |
 | Generated auditd rules loaded into a real kernel | privileged container | 57/57 rules accepted |
-| Installing sysmonforlinux from packages.microsoft.com | Ubuntu 22.04 | installs (1.5.3) |
-| `tests/linux-bundle.sh`: `install.sh build` → install from the bundle on a clean container **without network** → second run with no changes → modified bundle rejected | Ubuntu 22.04 (with Sysmon), Ubuntu 24.04, Oracle Linux 9 (rpm) | pass |
+| `tests/linux-bundle.sh`: `install.sh build` → install from the bundle on a clean container **without network** → second run with no changes → modified bundle rejected | Ubuntu 22.04, Ubuntu 24.04, Oracle Linux 9 (rpm) | pass |
 | `install.sh --fetch` downloads the main script from GitHub | Ubuntu 24.04 | pass |
 | Sysmon 10.42 and 10.2 in `vendor/`: Authenticode (Microsoft, valid at timestamp), FileVersion, pinned hash | osslsigncode + unit test | pass |
 
@@ -368,7 +361,6 @@ Alerts worth creating right away:
 - `Install-SecLogging.ps1` on real Windows (only its helper functions are unit-tested);
 - Alpine (no mirrors in the sandbox) and package installation on SUSE, Arch, Amazon Linux, CentOS 7;
 - `install.sh build` on CentOS 7 (`repotrack`);
-- Sysmon for Linux on a host with systemd (in a container, sysmon accepts any config without validating it).
 
 Suggested order:
 
@@ -379,6 +371,6 @@ Suggested order:
 ```bash
 pwsh -NoProfile -File tests/windows-unit.ps1
 ./tests/linux-docker.sh          # IMAGES="ubuntu:24.04 debian:12" to pick images
-./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 WITH_SYSMON=1, or IMAGE=oraclelinux:9
+./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 or IMAGE=oraclelinux:9
 # behind an HTTPS-only proxy: CA_FILE=/path/ca.crt PROXY=$HTTPS_PROXY ./tests/linux-docker.sh
 ```

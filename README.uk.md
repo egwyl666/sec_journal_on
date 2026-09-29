@@ -72,13 +72,13 @@ curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/
 # з клону
 sudo ./linux/install.sh --check                      # лише перевірка
 sudo ./linux/install.sh --configure-wazuh            # встановити онлайн
-sudo ./linux/install.sh build --with-sysmon          # офлайн-комплект для цього дистрибутива/версії/архітектури
-sudo ./seclogging-bundle-*/install.sh --from ./seclogging-bundle-ubuntu-22.04-x86_64 --with-sysmon   # на хості без інтернету
+sudo ./linux/install.sh build                        # офлайн-комплект для цього дистрибутива/версії/архітектури
+sudo ./seclogging-bundle-*/install.sh --from ./seclogging-bundle-ubuntu-22.04-x86_64   # на хості без інтернету
 ```
 
 `build` створює теку комплекту, у якій:
 - обидва скрипти;
-- пакети `auditd` і `sysmon` разом із **повним деревом залежностей**;
+- пакет `auditd` разом із **повним деревом залежностей**;
 - `SHA256SUMS`;
 - `bundle.info` — для якого дистрибутива, версії й архітектури зібрано комплект.
 
@@ -179,7 +179,7 @@ type C:\ProgramData\SecLogging\last-report.json   :: після перезава
 **Журнали.** Вимкнені журнали вмикаються. Розміри тільки ростуть. Режим — *Overwrite events as needed*, тож журнали ніколи не зупиняються і не забивають диск.
 
 | Клас | Журнали | WS | Server | DC |
-|---|---|---|---|---|
+|---|---|---|---|
 | Security | Security | 768 МБ | 1,5 ГБ | 3 ГБ |
 | Sysmon | Microsoft-Windows-Sysmon/Operational | 512 МБ | 1 ГБ | 1,5 ГБ |
 | PowerShell | PowerShell/Operational, Windows PowerShell, PowerShellCore/Operational | 384 МБ | 768 МБ | 1 ГБ |
@@ -277,7 +277,7 @@ SwiftOnSecurity `sysmonconfig-export.xml`, закріплений на комі�
 ```bash
 sudo ./linux/set-security-logging.sh --check          # лише звіт
 sudo ./linux/set-security-logging.sh                  # застосувати
-sudo ./linux/set-security-logging.sh --with-sysmon --configure-wazuh
+sudo ./linux/set-security-logging.sh --configure-wazuh
 ```
 
 | Що | Як |
@@ -287,7 +287,6 @@ sudo ./linux/set-security-logging.sh --with-sysmon --configure-wazuh
 | Правила | `/etc/audit/rules.d/50-seclogging.rules`: облікові записи, sudoers, PAM, SSH, cron/at/systemd/rc/profile, ld.so.preload, модулі ядра, hostname, час, ptrace-ін'єкції, монтування, execve у сесіях користувачів (ключ `audit-wazuh-c` під стандартні правила Wazuh), execve від облікових записів веб-сервера (`webshell`). Рядки `-w` пишуться, лише якщо шлях існує. Якщо ввімкнено незмінний режим (`-e 2`), скрипт попереджає, що потрібне перезавантаження. `--immutable` сам додає `-e 2` |
 | journald | `Storage=persistent`, `SystemMaxUse` 1G (WS) / 2G (сервер) через drop-in, лише збільшення |
 | Auth-лог | перевіряє rsyslog і фактичний auth-лог (`/var/log/auth.log`, `/var/log/secure`, інакше типовий для сімейства), а також що logrotate зберігає не менше 7 днів |
-| Sysmon for Linux | `--with-sysmon`: встановлення з packages.microsoft.com (підписано GPG) або офлайн через `--sysmon-package-dir DIR` (потрібен файл `SHA256SUMS`). Вбудований конфіг: процеси, мережа без loopback, створення файлів у місцях закріплення |
 | Wazuh | перевіряє агента і збір audit/auth-журналів. З `--configure-wazuh` дописує керований блок в `ossec.conf` |
 
 Звіт — у `/var/log/seclogging/last-report.json`, підсумковий рядок іде в syslog (тег `seclogging`).
@@ -296,25 +295,20 @@ sudo ./linux/set-security-logging.sh --with-sysmon --configure-wazuh
 
 Один скрипт для всіх: він сам визначає, що це за хост, і вибирає пакетний менеджер, назви пакетів, шляхи журналів і команди служб. Про дистрибутив нічого вказувати не треба.
 
-| Сімейство | Дистрибутиви | Пакетний менеджер | Офлайн-комплект (`install.sh build`) | Sysmon for Linux |
-|---|---|---|---|---|
-| deb | Ubuntu, Debian, Mint, Astra, Pop!_OS, Kali та інші похідні | apt | так | Ubuntu 18.04+, Debian 10+, похідні — за базовим |
-| rpm | RHEL, CentOS 7/8/Stream, Rocky, Alma, Oracle, Fedora, Amazon Linux | dnf / yum | так | RHEL-сумісні 7+ і Fedora (ядро ≥ 4.15, тож не CentOS 7) |
-| suse | SLES, openSUSE Leap/Tumbleweed | zypper | ні (лише онлайн) | SLES / Leap 15 |
-| arch | Arch, Manjaro, EndeavourOS | pacman | ні (лише онлайн) | ні |
-| alpine | Alpine (OpenRC, потрібен `apk add bash`) | apk | ні (лише онлайн) | ні |
-| інші | будь-що з `/etc/os-release` | немає | ні | ні |
+| Сімейство | Дистрибутиви | Пакетний менеджер | Офлайн-комплект (`install.sh build`) |
+|---|---|---|---|
+| deb | Ubuntu, Debian, Mint, Astra, Pop!_OS, Kali та інші похідні | apt | так |
+| rpm | RHEL, CentOS 7/8/Stream, Rocky, Alma, Oracle, Fedora, Amazon Linux | dnf / yum | так |
+| suse | SLES, openSUSE Leap/Tumbleweed | zypper | ні (лише онлайн) |
+| arch | Arch, Manjaro, EndeavourOS | pacman | ні (лише онлайн) |
+| alpine | Alpine (OpenRC, потрібен `apk add bash`) | apk | ні (лише онлайн) |
+| інші | будь-що з `/etc/os-release` | немає | ні |
 
 На невідомому дистрибутиві auditd має бути вже встановлений. Тоді скрипт налаштує все інше, а замість встановлення пакетів покаже попередження.
 
 CentOS 7 і 8 більше не підтримуються: їхні типові репозиторії не працюють. Скрипт про це повідомляє і пропонує `vault.centos.org` або офлайн-комплект.
 
-**Чи є сенс у Sysmon for Linux?** Помірний. Основою залишається auditd. Sysmon додає мережеві з'єднання з прив'язкою до процесу (через auditd це шумно й незручно) та спільну з Windows схему подій. Мінуси:
-- потрібен eBPF (ядро ≥ 4.15);
-- пакета немає в репозиторіях дистрибутива;
-- події приходять у syslog у вигляді XML, і **Wazuh потрібні додаткові декодери**.
-
-Тому за замовчуванням він вимкнений. Спершу увімкніть на кількох серверах і подивіться на обсяг подій.
+**Чому без Sysmon for Linux.** Штатні засоби вже покривають головне: auditd записує запуск процесів з повним командним рядком і користувачем, зміни файлів і конфігурації, модулі ядра та підвищення привілеїв, а journald/syslog — входи, sudo і служби. Wazuh розбирає все це з коробки. Sysmon for Linux додав би ще один агент з eBPF-сенсором (ядро ≥ 4.15), пакети не з репозиторіїв дистрибутива і XML-події, які Wazuh не розбирає без власних декодерів.
 
 ---
 
@@ -356,8 +350,7 @@ done
 | Встановлення auditd самим скриптом через пакетний менеджер | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | успішно |
 | Стенд Server 2008 R2: Sysmon 10.42 з конфігом схеми 4.22 | VM, PowerShell 2.0 | працює, події пишуться |
 | Завантаження згенерованих правил auditd у справжнє ядро | privileged-контейнер | прийнято 57/57 правил |
-| Встановлення sysmonforlinux з packages.microsoft.com | Ubuntu 22.04 | встановлюється (1.5.3) |
-| `tests/linux-bundle.sh`: `install.sh build` → встановлення з комплекту на чистий контейнер **без мережі** → повторний запуск без змін → змінений комплект відхилено | Ubuntu 22.04 (із Sysmon), Ubuntu 24.04, Oracle Linux 9 (rpm) | успішно |
+| `tests/linux-bundle.sh`: `install.sh build` → встановлення з комплекту на чистий контейнер **без мережі** → повторний запуск без змін → змінений комплект відхилено | Ubuntu 22.04, Ubuntu 24.04, Oracle Linux 9 (rpm) | успішно |
 | `install.sh --fetch` завантажує основний скрипт з GitHub | Ubuntu 24.04 | успішно |
 | Sysmon 10.42 і 10.2 у `vendor/`: Authenticode (Microsoft, дійсний на момент мітки часу), FileVersion, закріплений хеш | osslsigncode + юніт-тест | успішно |
 
@@ -368,7 +361,6 @@ done
 - `Install-SecLogging.ps1` на справжній Windows (юніт-тестами покрито лише його допоміжні функції);
 - Alpine (дзеркала недоступні з пісочниці) і встановлення пакетів на SUSE, Arch, Amazon Linux, CentOS 7;
 - `install.sh build` на CentOS 7 (`repotrack`);
-- Sysmon for Linux на хості з systemd (у контейнері sysmon приймає будь-який конфіг без перевірки).
 
 Рекомендований порядок:
 
@@ -379,6 +371,6 @@ done
 ```bash
 pwsh -NoProfile -File tests/windows-unit.ps1
 ./tests/linux-docker.sh          # IMAGES="ubuntu:24.04 debian:12" щоб вибрати образи
-./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 WITH_SYSMON=1 або IMAGE=oraclelinux:9
+./tests/linux-bundle.sh          # IMAGE=ubuntu:22.04 або IMAGE=oraclelinux:9
 # за проксі лише з HTTPS: CA_FILE=/path/ca.crt PROXY=$HTTPS_PROXY ./tests/linux-docker.sh
 ```

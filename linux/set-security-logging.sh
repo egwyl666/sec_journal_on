@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # set-security-logging.sh - визначає хост, перевіряє та вмикає журналювання безпеки Linux:
 #   auditd (+ правила), постійне зберігання і розмір journald, наявність/ротація auth-логу,
-#   за бажанням Sysmon for Linux, збір журналів агентом Wazuh.
+#   збір журналів агентом Wazuh. Лише штатні засоби Linux, без сторонніх агентів.
 #
 # Порядок: визначення -> поточний стан -> застосувати лише відсутнє -> перевірка -> звіт.
 # Значення лише підвищуються: більші ліміти, вже налаштовані на хості, залишаються.
@@ -9,8 +9,6 @@
 # Використання: sudo ./set-security-logging.sh [параметри]
 #   --check                 лише перевірка, нічого не змінює
 #   --profile P             auto|workstation|server (за замовчуванням auto)
-#   --with-sysmon           встановити/налаштувати Sysmon for Linux (packages.microsoft.com)
-#   --sysmon-package-dir D  офлайн Sysmon: тека з .deb/.rpm + SHA256SUMS
 #   --configure-wazuh       додати відсутні <localfile> в ossec.conf агента Wazuh
 #   --immutable             заблокувати правила аудиту (-e 2) до перезавантаження
 #   --report FILE           шлях до JSON-звіту (типово /var/log/seclogging/report-<час>.json)
@@ -20,11 +18,9 @@
 set -u
 umask 027
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 CHECK=0
 PROFILE="auto"
-WITH_SYSMON=0
-SYSMON_PKG_DIR=""
 CONFIGURE_WAZUH=0
 IMMUTABLE=0
 REPORT=""
@@ -32,8 +28,6 @@ QUIET=0
 
 RULES_FILE="/etc/audit/rules.d/50-seclogging.rules"
 JOURNALD_DROPIN="/etc/systemd/journald.conf.d/50-seclogging.conf"
-STATE_DIR="/var/lib/seclogging"
-SYSMON_CFG="/etc/seclogging/sysmon-linux.xml"
 MARK_BEGIN="<!-- SecLogging BEGIN (managed by set-security-logging.sh) -->"
 MARK_END="<!-- SecLogging END -->"
 
@@ -43,8 +37,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --check) CHECK=1 ;;
         --profile) PROFILE="${2:-}"; shift ;;
-        --with-sysmon) WITH_SYSMON=1 ;;
-        --sysmon-package-dir) SYSMON_PKG_DIR="${2:-}"; WITH_SYSMON=1; shift ;;
+        --with-sysmon|--sysmon-package-dir) echo "Sysmon for Linux більше не підтримується: достатньо auditd і journald" >&2; exit 64 ;;
         --configure-wazuh) CONFIGURE_WAZUH=1 ;;
         --immutable) IMMUTABLE=1 ;;
         --report) REPORT="${2:-}"; shift ;;
@@ -112,7 +105,7 @@ backup_once() { [ -f "$1" ] && [ ! -f "$1.seclogging.bak" ] && cp -p "$1" "$1.se
 
 # ------------------------------------------------------------------ визначення хоста
 
-OS_ID=""; OS_LIKE=""; OS_VER=""; OS_NAME=""; OS_CODENAME=""; FAMILY="unknown"; PKG=""
+OS_ID=""; OS_LIKE=""; OS_VER=""; OS_NAME=""; FAMILY="unknown"; PKG=""
 HAS_SYSTEMD=0; HAS_OPENRC=0; IN_CONTAINER=0; ROLE=""; ARCH=$(uname -m); KERNEL=$(uname -r)
 
 detect_host() {
@@ -120,7 +113,6 @@ detect_host() {
         # shellcheck disable=SC1091
         . /etc/os-release
         OS_ID="${ID:-}"; OS_LIKE="${ID_LIKE:-}"; OS_VER="${VERSION_ID:-}"; OS_NAME="${PRETTY_NAME:-$OS_ID}"
-        OS_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
     elif [ -r /etc/redhat-release ]; then
         OS_ID="rhel"; OS_NAME=$(head -1 /etc/redhat-release); OS_VER=$(grep -oE '[0-9]+(\.[0-9]+)?' /etc/redhat-release | head -1)
     fi
@@ -537,146 +529,6 @@ do_authlog() {
     else result authlog logrotate Warning "$f: зберігається лише ~${days} дн. (rotate ${rot:-?} ${period:-?}), потрібно >= 7"; fi
 }
 
-# ------------------------------------------------------------------ Sysmon for Linux
-
-SYSMON_CONFIG_XML='<Sysmon schemaversion="4.70">
-  <!-- Керується set-security-logging.sh. Події йдуть у syslog (Linux-Sysmon/Operational). -->
-  <EventFiltering>
-    <!-- 1: створення процесів (усі) -->
-    <RuleGroup name="" groupRelation="or">
-      <ProcessCreate onmatch="exclude"/>
-    </RuleGroup>
-    <!-- 3: мережеві зʼєднання, без loopback -->
-    <RuleGroup name="" groupRelation="or">
-      <NetworkConnect onmatch="exclude">
-        <DestinationIp condition="is">127.0.0.1</DestinationIp>
-        <DestinationIp condition="is">::1</DestinationIp>
-      </NetworkConnect>
-    </RuleGroup>
-    <!-- 5: завершення процесів - вимкнено -->
-    <RuleGroup name="" groupRelation="or">
-      <ProcessTerminate onmatch="include"/>
-    </RuleGroup>
-    <!-- 9: пряме читання диска -->
-    <RuleGroup name="" groupRelation="or">
-      <RawAccessRead onmatch="exclude"/>
-    </RuleGroup>
-    <!-- 11: створення файлів у місцях закріплення / чутливих місцях -->
-    <RuleGroup name="" groupRelation="or">
-      <FileCreate onmatch="include">
-        <TargetFilename condition="begin with">/etc/cron</TargetFilename>
-        <TargetFilename condition="begin with">/var/spool/cron</TargetFilename>
-        <TargetFilename condition="begin with">/etc/systemd/system</TargetFilename>
-        <TargetFilename condition="begin with">/etc/sudoers</TargetFilename>
-        <TargetFilename condition="begin with">/etc/ld.so</TargetFilename>
-        <TargetFilename condition="begin with">/etc/profile.d</TargetFilename>
-        <TargetFilename condition="end with">/.ssh/authorized_keys</TargetFilename>
-        <TargetFilename condition="end with">.bashrc</TargetFilename>
-        <TargetFilename condition="begin with">/dev/shm</TargetFilename>
-      </FileCreate>
-    </RuleGroup>
-    <!-- 23: видалення файлів - вимкнено -->
-    <RuleGroup name="" groupRelation="or">
-      <FileDelete onmatch="include"/>
-    </RuleGroup>
-  </EventFiltering>
-</Sysmon>'
-
-kernel_ge() { # kernel_ge 4.15
-    local cur; cur=$(printf '%s' "$KERNEL" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
-    ver_ge "$cur" "$1"
-}
-
-# кодове імʼя Ubuntu -> версія (для похідних: Mint, Pop!_OS, elementary, Zorin ...)
-ubuntu_ver_by_codename() {
-    case "$1" in
-        bionic) echo 18.04 ;; focal) echo 20.04 ;; jammy) echo 22.04 ;; noble) echo 24.04 ;; plucky) echo 25.04 ;;
-        *) echo "" ;;
-    esac
-}
-
-sysmon_repo_url() {
-    local major="${OS_VER%%.*}" base="https://packages.microsoft.com/config" v
-    case "$OS_ID" in
-        ubuntu) echo "$base/ubuntu/$OS_VER/packages-microsoft-prod.deb"; return ;;
-        debian) echo "$base/debian/$major/packages-microsoft-prod.deb"; return ;;
-        rhel|rocky|almalinux|centos|ol) echo "$base/rhel/$major/packages-microsoft-prod.rpm"; return ;;
-        fedora) echo "$base/fedora/$major/packages-microsoft-prod.rpm"; return ;;
-        sles|opensuse-leap) echo "$base/sles/$major/packages-microsoft-prod.rpm"; return ;;
-    esac
-    # похідні дистрибутиви: за базовим
-    case " $OS_LIKE " in
-        *" ubuntu "*) v=$(ubuntu_ver_by_codename "$OS_CODENAME"); [ -n "$v" ] && echo "$base/ubuntu/$v/packages-microsoft-prod.deb" ;;
-        *" debian "*) v=$(cut -d. -f1 /etc/debian_version 2>/dev/null); case "$v" in ''|*[!0-9]*) ;; *) echo "$base/debian/$v/packages-microsoft-prod.deb" ;; esac ;;
-        *" rhel "*|*" centos "*) echo "$base/rhel/$major/packages-microsoft-prod.rpm" ;;
-    esac
-}
-
-install_sysmon_pkg() {
-    case "$FAMILY" in deb|rpm|suse) ;; *) echo "Sysmon for Linux не має пакетів для $OS_ID"; return 1 ;; esac
-    if [ -n "$SYSMON_PKG_DIR" ]; then
-        # офлайн: спершу перевіряємо SHA256SUMS
-        [ -f "$SYSMON_PKG_DIR/SHA256SUMS" ] || { echo "SHA256SUMS відсутній у $SYSMON_PKG_DIR"; return 1; }
-        (cd "$SYSMON_PKG_DIR" && sha256sum -c --quiet SHA256SUMS) || { echo "перевірка SHA256SUMS не пройдена"; return 1; }
-        case "$FAMILY" in
-            deb) DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$SYSMON_PKG_DIR"/*.deb ;;
-            rpm) $PKG install -y -q "$SYSMON_PKG_DIR"/*.rpm ;;
-            suse) zypper --non-interactive install "$SYSMON_PKG_DIR"/*.rpm ;;
-            *) return 1 ;;
-        esac
-        return $?
-    fi
-    # online: репозиторій Microsoft (початкове завантаження по HTTPS, далі репозиторій з перевіркою GPG)
-    local url tmp; url=$(sysmon_repo_url)
-    [ -n "$url" ] || { echo "немає репозиторію packages.microsoft.com для $OS_ID $OS_VER"; return 1; }
-    tmp=$(mktemp -d)
-    have curl || have wget || pkg_install curl ca-certificates
-    if have curl; then curl -fsSL -o "$tmp/pkg" "$url"; else wget -q -O "$tmp/pkg" "$url"; fi || { echo "завантаження не вдалося: $url"; rm -rf "$tmp"; return 1; }
-    case "$FAMILY" in
-        deb) mv "$tmp/pkg" "$tmp/pkg.deb"; dpkg -i "$tmp/pkg.deb" && apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q sysmonforlinux ;;
-        rpm) mv "$tmp/pkg" "$tmp/pkg.rpm"; rpm -Uvh --replacepkgs "$tmp/pkg.rpm" && $PKG install -y -q sysmonforlinux ;;
-        suse) mv "$tmp/pkg" "$tmp/pkg.rpm"; rpm -Uvh --replacepkgs "$tmp/pkg.rpm" && zypper --non-interactive install sysmonforlinux ;;
-    esac
-    local rc=$?; rm -rf "$tmp"; return $rc
-}
-
-do_sysmon() {
-    if [ "$WITH_SYSMON" -eq 0 ]; then
-        if have sysmon; then result sysmon sysmon OK "встановлено (без --with-sysmon не керується)"
-        else result sysmon sysmon Skipped "не запитано (--with-sysmon)"; fi
-        return
-    fi
-    if [ "$IN_CONTAINER" -eq 1 ]; then result sysmon sysmon Skipped "контейнер: eBPF-сенсор належить хосту"; return; fi
-    if ! kernel_ge 4.15; then result sysmon sysmon Warning "ядро $KERNEL < 4.15: Sysmon for Linux (eBPF) не підтримується"; return; fi
-
-    local cfg_hash applied=""
-    cfg_hash=$(printf '%s\n' "$SYSMON_CONFIG_XML" | sha256sum | awk '{print $1}')
-    [ -f "$STATE_DIR/sysmon-config.sha256" ] && applied=$(cat "$STATE_DIR/sysmon-config.sha256")
-
-    if ! have sysmon; then
-        if [ "$CHECK" -eq 1 ]; then result sysmon sysmon WouldChange "встановити sysmonforlinux + конфіг"; return; fi
-        local out; out=$(install_sysmon_pkg 2>&1)
-        if ! have sysmon; then result sysmon package Error "встановлення не вдалося: $(printf '%s' "$out" | tail -3)"; return; fi
-        result sysmon package Changed "sysmonforlinux встановлено"
-    else
-        result sysmon package OK "$(dpkg-query -W -f='${Version}' sysmonforlinux 2>/dev/null || rpm -q sysmonforlinux 2>/dev/null)"
-    fi
-
-    local running=0; svc_active sysmon && running=1
-    if [ "$running" -eq 1 ] && [ "$applied" = "$cfg_hash" ]; then result sysmon config OK "$cfg_hash"; return; fi
-    if [ "$CHECK" -eq 1 ]; then result sysmon config WouldChange "застосувати $cfg_hash"; return; fi
-    mkdir -p "$(dirname "$SYSMON_CFG")" "$STATE_DIR"
-    printf '%s\n' "$SYSMON_CONFIG_XML" > "$SYSMON_CFG"
-    local out
-    if [ "$running" -eq 1 ]; then out=$(sysmon -c "$SYSMON_CFG" 2>&1); else out=$(sysmon -accepteula -i "$SYSMON_CFG" 2>&1); fi
-    if svc_active sysmon; then
-        echo "$cfg_hash" > "$STATE_DIR/sysmon-config.sha256"
-        result sysmon config Changed "застосовано $cfg_hash, служба працює"
-    else
-        result sysmon config Error "sysmon не працює: $(printf '%s' "$out" | tail -3)"
-    fi
-}
-
 # ------------------------------------------------------------------ Wazuh
 
 do_wazuh() {
@@ -688,9 +540,6 @@ do_wazuh() {
     # потрібні: "формат|розташування"
     local wanted=("audit|/var/log/audit/audit.log")
     if [ -n "$AUTH_LOG" ]; then wanted+=("syslog|$AUTH_LOG"); else wanted+=("journald|journald"); fi
-    if [ "$WITH_SYSMON" -eq 1 ] && [ -n "$AUTH_LOG" ]; then
-        if [ -f /var/log/syslog ] || { [ "$FAMILY" = "deb" ] && [ ! -f /var/log/messages ]; }; then wanted+=("syslog|/var/log/syslog"); else wanted+=("syslog|/var/log/messages"); fi
-    fi
     local present missing=() w loc
     present=$(cat "$conf" "$shared" 2>/dev/null | grep -oE '<location>[^<]+</location>' | sed -E 's|</?location>||g')
     for w in "${wanted[@]}"; do
@@ -743,7 +592,6 @@ main() {
     do_auditd
     do_journald
     do_authlog
-    do_sysmon
     do_wazuh
 
     local finished; finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)

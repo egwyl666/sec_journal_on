@@ -3,7 +3,7 @@
 #
 # Використання:
 #   sudo ./install.sh [install] [параметри] [параметри set-security-logging.sh]
-#   sudo ./install.sh build [--out DIR] [--with-sysmon] [--no-auditd]
+#   sudo ./install.sh build [--out DIR] [--no-auditd]
 #
 # Команди:
 #   install (за замовчуванням)  налаштувати цей хост (онлайн або з комплекту --from)
@@ -13,7 +13,6 @@
 # Параметри:
 #   --from DIR       install: взяти комплект з DIR (перевіряється SHA256SUMS)
 #   --out DIR        build: тека комплекту (типово ./seclogging-bundle-<os>-<версія>-<arch>)
-#   --with-sysmon    build: додати пакети Sysmon for Linux; install: встановити Sysmon
 #   --no-auditd      build: не додавати пакети auditd
 #   --fetch          завантажити свіжий set-security-logging.sh з GitHub
 #   --ref REF        гілка/тег/коміт для --fetch (типово HEAD)
@@ -29,14 +28,13 @@ REF="HEAD"
 CMD="install"
 FROM=""
 OUT=""
-WITH_SYSMON=0
 WITH_AUDITD=1
 FETCH=0
 PASS=()
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 
 usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
-die() { echo "ПОМИЛКА: $*" >&2; exit "${2:-2}"; }
+die() { echo "ПОМИЛКА: $1" >&2; exit "${2:-2}"; }
 info() { echo "==> $*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -45,7 +43,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --from) FROM="${2:-}"; shift ;;
         --out) OUT="${2:-}"; shift ;;
-        --with-sysmon) WITH_SYSMON=1 ;;
+        --with-sysmon) die "Sysmon for Linux більше не підтримується: достатньо auditd і journald" 64 ;;
         --no-auditd) WITH_AUDITD=0 ;;
         --fetch) FETCH=1 ;;
         --ref) REF="${2:-}"; shift ;;
@@ -99,28 +97,6 @@ get_main_script() {
 }
 
 # ------------------------------------------------------------------ build
-
-ms_repo_url() {
-    local major="${HOST_VER%%.*}"
-    case "$HOST_ID" in
-        ubuntu) echo "https://packages.microsoft.com/config/ubuntu/$HOST_VER/packages-microsoft-prod.deb" ;;
-        debian) echo "https://packages.microsoft.com/config/debian/$major/packages-microsoft-prod.deb" ;;
-        rhel|rocky|almalinux|centos|ol) echo "https://packages.microsoft.com/config/rhel/$major/packages-microsoft-prod.rpm" ;;
-        fedora) echo "https://packages.microsoft.com/config/fedora/$major/packages-microsoft-prod.rpm" ;;
-        *) echo "" ;;
-    esac
-}
-
-add_ms_repo() {
-    local url tmp; url=$(ms_repo_url)
-    [ -n "$url" ] || die "немає репозиторію packages.microsoft.com для $HOST_ID $HOST_VER"
-    tmp=$(mktemp -d)
-    case "$FAMILY" in
-        deb) download "$url" "$tmp/p.deb" && dpkg -i "$tmp/p.deb" >/dev/null && apt-get update -qq >/dev/null ;;
-        rpm) download "$url" "$tmp/p.rpm" && rpm -Uvh --replacepkgs "$tmp/p.rpm" >/dev/null ;;
-    esac || die "не вдалося додати репозиторій Microsoft ($url)"
-    rm -rf "$tmp"
-}
 
 deb_closure() { # deb_closure PACKAGE... -> імена всіх пакетів дерева залежностей (без віртуальних)
     apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks \
@@ -183,13 +159,6 @@ do_build() {
         fi
         write_sums "$OUT/auditd"
         echo "    auditd: $(find "$OUT/auditd" -name '*.deb' -o -name '*.rpm' | wc -l) пакет(и)"
-    fi
-    if [ "$WITH_SYSMON" -eq 1 ]; then
-        rm -rf "$OUT/sysmon"
-        add_ms_repo
-        pkg_download "$OUT/sysmon" sysmonforlinux sysinternalsebpf || die "не вдалося завантажити пакети Sysmon for Linux"
-        write_sums "$OUT/sysmon"
-        echo "    sysmon: $(find "$OUT/sysmon" -name '*.deb' -o -name '*.rpm' | wc -l) пакет(и)"
     fi
     printf 'OS_ID=%s\nOS_VERSION_ID=%s\nARCH=%s\nFAMILY=%s\nCREATED=%s\n' \
         "$HOST_ID" "$HOST_VER" "$HOST_ARCH" "$FAMILY" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$OUT/bundle.info"
@@ -262,19 +231,8 @@ do_install() {
             else echo "    не вдалося (див. /tmp/seclogging-offline.log); set-security-logging.sh спробує через менеджер пакетів"; fi
         fi
         main="$FROM/set-security-logging.sh"
-        if [ "$WITH_SYSMON" -eq 1 ]; then
-            if ! have sysmon && [ -d "$FROM/sysmon" ]; then
-                info "Офлайн-встановлення Sysmon for Linux з комплекту"
-                if install_offline_pkgs "$FROM/sysmon"; then echo "    встановлено"
-                else echo "    не вдалося (див. /tmp/seclogging-offline.log)"; fi
-            elif [ ! -d "$FROM/sysmon" ]; then
-                echo "    у комплекті немає Sysmon - буде спроба онлайн"
-            fi
-            args+=(--with-sysmon)
-        fi
     else
         main=$(get_main_script) || die "не вдалося отримати set-security-logging.sh (перевірте інтернет або використайте --from)"
-        [ "$WITH_SYSMON" -eq 1 ] && args+=(--with-sysmon)
     fi
     info "Запуск $main ${args[*]:-}"
     bash "$main" ${args[@]+"${args[@]}"}
