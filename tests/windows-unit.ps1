@@ -382,6 +382,18 @@ foreach ($f in 'windows/Set-SecurityLogging.ps1', 'windows/Start-SecLogging.ps1'
     Assert ($bad.Count -eq 0) "${f}: немає `$x = ... поверх `$Script:x [$($bad -join ', ')]"
 }
 
+Write-Host 'Повторно використаний пакет отримує свіжий скрипт'
+Import-ScriptFunctions $installer
+$srcD = Join-Path ([IO.Path]::GetTempPath()) ('src-' + [guid]::NewGuid()); $pkgD = Join-Path ([IO.Path]::GetTempPath()) ('pkg-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $srcD, $pkgD | Out-Null
+Set-Content -LiteralPath (Join-Path $srcD 'Set-SecurityLogging.ps1') -Value "`$ScriptVersion = '1.1.0'"
+Set-Content -LiteralPath (Join-Path $pkgD 'Set-SecurityLogging.ps1') -Value "`$ScriptVersion = '1.0.0'"
+$u = Update-PackageScript $srcD $pkgD
+Assert ($u.Updated -and $u.From -eq '1.0.0' -and $u.To -eq '1.1.0' -and (Get-ScriptVersion (Join-Path $pkgD 'Set-SecurityLogging.ps1')) -eq '1.1.0') 'стара копія в пакеті замінюється (1.0.0 -> 1.1.0)'
+Assert (-not (Update-PackageScript $srcD $pkgD).Updated) 'однаковий скрипт не копіюється вдруге'
+Assert ((Get-ScriptVersion $main) -match '^\d+\.\d+\.\d+$') "версія основного скрипта читається ($(Get-ScriptVersion $main))"
+Remove-Item -LiteralPath $srcD, $pkgD -Recurse -Force
+
 Write-Host ''
 Write-Host "Пройдено: $script:passed  Не пройдено: $script:failed"
 if ($script:failed) { exit 1 }

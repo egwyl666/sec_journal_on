@@ -202,6 +202,28 @@ function Test-Package {
     @{ Ok = ($problems.Count -eq 0); Problems = $problems }
 }
 
+function Get-ScriptVersion {
+    # Версія зі рядка "$ScriptVersion = 'x.y.z'" у скрипті; '?' якщо не знайдено
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return '?' }
+    $m = [regex]::Match([System.IO.File]::ReadAllText($Path), '(?m)^\$ScriptVersion\s*=\s*''([^'']+)''')
+    if ($m.Success) { return $m.Groups[1].Value }
+    '?'
+}
+
+function Update-PackageScript {
+    # Повторно використаний пакет несе копію Set-SecurityLogging.ps1 з моменту збирання.
+    # Якщо поруч свіжіший скрипт (інший SHA256) - замінює копію в пакеті. Повертає @{ Updated; From; To }.
+    param([string]$SrcDir, [string]$PkgDir)
+    $src = Join-Path $SrcDir 'Set-SecurityLogging.ps1'; $dst = Join-Path $PkgDir 'Set-SecurityLogging.ps1'
+    $r = @{ Updated = $false; From = (Get-ScriptVersion $dst); To = (Get-ScriptVersion $src) }
+    if (-not (Test-Path -LiteralPath $src) -or -not (Test-Path -LiteralPath $PkgDir)) { return $r }
+    if ((Test-Path -LiteralPath $dst) -and (Get-FileSha256 $src) -eq (Get-FileSha256 $dst)) { return $r }
+    Copy-Item -LiteralPath $src -Destination $dst -Force
+    $r.Updated = $true
+    $r
+}
+
 function Get-ArchiveUrl {
     param([string]$Owner, [string]$Repo, [string]$Ref)
     'https://github.com/{0}/{1}/archive/{2}.zip' -f $Owner, $Repo, $Ref
@@ -339,6 +361,11 @@ if ($NoBuild) {
 }
 elseif ($check.Ok -and -not $Rebuild) {
     Write-Host '    наявний пакет коректний, використовується повторно (-Rebuild щоб зібрати заново)'
+    # Sysmon і конфіги лишаються (перевірені за SHA256), а скрипт - завжди найсвіжіший
+    if ($srcWindows) {
+        $upd = Update-PackageScript $srcWindows $PackagePath
+        if ($upd.Updated) { Write-Host ("    скрипт у пакеті оновлено: {0} -> {1}" -f $upd.From, $upd.To) -ForegroundColor Green }
+    }
 }
 else {
     if (-not $check.Ok -and (Test-Path -LiteralPath $PackagePath)) { Write-Host ("    збираємо заново: {0}" -f ($check.Problems -join '; ')) }
