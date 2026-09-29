@@ -35,13 +35,13 @@ Open **PowerShell or cmd as administrator** (Windows; the same line works in bot
 **Windows** (10/11, Server 2008 R2 … 2025, domain controllers):
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.2/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
 ```
 
 **Linux** (any distribution from the table below; the line uses `curl`, or `wget` where there is no `curl`, e.g. Ubuntu Desktop):
 
 ```bash
-(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.2/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.2/linux/install.sh) | sudo bash
+(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/linux/install.sh) | sudo bash
 ```
 
 What happens:
@@ -85,19 +85,19 @@ Example (Ubuntu, first run):
 Check only, change nothing:
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.2/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF))) -AuditOnly"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF))) -AuditOnly"
 ```
 ```bash
-(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.2/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.2/linux/install.sh) | sudo bash -s -- --check
+(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/linux/install.sh) | sudo bash -s -- --check
 ```
 
-No internet on the machine: download `https://github.com/egwyl666/sec_journal_on/archive/refs/tags/v1.3.2.zip` elsewhere, copy it over and run `powershell -ExecutionPolicy Bypass -File <unpacked>\windows\Start-SecLogging.ps1 -Source <path to the zip>` (Linux: the offline bundle, see below).
+No internet on the machine: download `https://github.com/egwyl666/sec_journal_on/archive/refs/tags/v1.3.3.zip` elsewhere, copy it over and run `powershell -ExecutionPolicy Bypass -File <unpacked>\windows\Start-SecLogging.ps1 -Source <path to the zip>` (Linux: the offline bundle, see below).
 
 To compare any two snapshots later: `Set-SecurityLogging.ps1 -CompareBefore a.tsv -CompareAfter b.tsv -CompareOut changes.txt` / `set-security-logging.sh --compare a.tsv b.tsv`.
 
 ### Versions and updates
 
-The commands above are pinned to a **release** (`v1.3.2`), not to the latest commit: a change in the repository does not reach machines until a new release is published, and a compromised branch cannot push code to every machine. To roll out a new release, replace `v1.3.2` in the command with the new tag. `-Ref HEAD` (Windows) / `-s -- --ref HEAD` (Linux) runs the latest development version for testing.
+The commands above are pinned to a **release** (`v1.3.3`), not to the latest commit: a change in the repository does not reach machines until a new release is published, and a compromised branch cannot push code to every machine. To roll out a new release, replace `v1.3.3` in the command with the new tag. `-Ref HEAD` (Windows) / `-s -- --ref HEAD` (Linux) runs the latest development version for testing.
 
 ## Quick start (automated)
 
@@ -109,7 +109,7 @@ The installers do "download → build package → install" in one command. You d
 # machine with internet: download the installer from GitHub and run it (paste into PowerShell)
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
 $f = "$env:TEMP\Install-SecLogging.ps1"
-(New-Object Net.WebClient).DownloadFile('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.2/windows/Install-SecLogging.ps1', $f)
+(New-Object Net.WebClient).DownloadFile('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/windows/Install-SecLogging.ps1', $f)
 powershell -ExecutionPolicy Bypass -File $f -Fetch -AuditOnly
 
 # from a clone of the repository (first allow scripts in this window only;
@@ -132,14 +132,14 @@ Get-ChildItem -Recurse | Unblock-File
 | `Domain` | builds the package and runs `New-SecLoggingGpo.ps1` with it (`-WhatIfGpo` for a dry run, `-LinkTargets`, `-SetDomainRootSacl`) |
 
 - A valid package is reused. Use `-Rebuild` to build it again, or `-NoBuild` on a machine without internet to use an existing package only.
-- `-Fetch` downloads the scripts as a zip from GitHub (`-RepoRef` picks a branch/tag/commit, default the pinned release `v1.3.2`).
+- `-Fetch` downloads the scripts as a zip from GitHub (`-RepoRef` picks a branch/tag/commit, default the pinned release `v1.3.3`).
 - All `Set-SecurityLogging.ps1` switches (`-AuditOnly`, `-SkipSysmon`, `-UpgradeSysmon`, `-DisablePowerShellV2`, `-ConfigureWazuh`, `-AllowLegacySysmon`, `-LegacySysmonVersion`, `-ReinstallSysmon`, `-TranscriptionPath`, …) are passed through.
 
 **Linux** (root):
 
 ```bash
 # one-liner on a host with internet
-curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.2/linux/install.sh -o install.sh && sudo bash install.sh --fetch --check
+curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/linux/install.sh -o install.sh && sudo bash install.sh --fetch --check
 
 # from a clone
 sudo ./linux/install.sh --check                      # check only
@@ -335,7 +335,7 @@ The PowerShell 2.0 engine predates all the protection mechanisms. It has **no** 
    mkdir C:\SecLab\updates & net share SecLab=C:\SecLab /grant:Everyone,FULL & icacls C:\SecLab /grant Everyone:(OI)(CI)F & netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes & ipconfig
    ```
 2. **Host** (browser, no admin):
-   - download the repository ZIP: <https://github.com/egwyl666/sec_journal_on/archive/refs/tags/v1.3.2.zip>;
+   - download the repository ZIP: <https://github.com/egwyl666/sec_journal_on/archive/refs/tags/v1.3.3.zip>;
    - download KB4474419 and KB4490628 (Windows Server 2008 R2, x64) from the Microsoft Update Catalog;
    - in Explorer, open `\\<VM IP>\SecLab` (log in as `<VM>\Administrator`), copy the ZIP there and the `.msu` files into `updates`.
 3. **VM**: right-click the ZIP → *Extract All…* → `C:\SecLab`, then run:
@@ -440,7 +440,7 @@ Tuning: 4769 RC4 alerts are noisy where RC4 is still in use, and 7045/4697 durin
 |---|---|---|
 | Syntax of both `.ps1` files, PSScriptAnalyzer (Warning/Error) | pwsh 7 on Linux | clean |
 | PowerShell 2.0: no PS3+ constructs | grep + PSUseCompatibleSyntax | clean |
-| Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op, PowerShell 2.0 fallbacks | pwsh 7 | 152/152 |
+| Unit tests `tests/windows-unit.ps1`: settings, auditpol parsing with localized names, JSON, size planning, hash checks, Wazuh block, `audit.csv`/`scripts.ini`/CSE, audit and event log logic with mocked auditpol/wevtutil, second run is a no-op, PowerShell 2.0 fallbacks | pwsh 7 | 155/155 |
 | Wazuh rules `tests/wazuh-rules.sh`: the manager starts with `seclogging_rules.xml`, 64 events (Windows via the eventchannel decoder, auditd, syslog) are fed the way an agent sends them; for each, the expected rule fires, or ours stay silent for normal events | wazuh-manager 4.14 in Docker | 64/64 |
 | `tests/linux-docker.sh`: check → apply → second apply with no changes | Ubuntu 24.04 / 20.04, Mint 21.3, Oracle Linux 9 with real auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch with a stub auditctl (their mirrors were unreachable from the sandbox) | pass (13 distributions) |
 | auditd installed by the script itself through the package manager | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | pass |

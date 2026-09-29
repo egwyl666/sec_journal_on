@@ -189,7 +189,7 @@ function Write-Host {
 
 #endregion
 
-$ScriptVersion = '1.3.2'
+$ScriptVersion = '1.3.3'
 $ScriptPath = $MyInvocation.MyCommand.Path
 $ScriptDir = Split-Path -Parent $ScriptPath
 $StateRegPath = 'SOFTWARE\SecLogging'
@@ -798,16 +798,22 @@ function Invoke-AuditPolicy {
         $cur = 0; if ($current.ContainsKey($guid)) { $cur = $current[$guid] }
         $target = $cur -bor $want
         $item = $a.Name
-        $gpoNote = ''
-        if ($gpo.ContainsKey($guid) -and (($gpo[$guid] -bor $want) -ne $gpo[$guid])) {
-            $gpoNote = ('GPO задає {0}, потрібно щонайменше {1} - оновіть GPO' -f (Format-AuditValue $gpo[$guid]), (Format-AuditValue $want))
-        }
-        if ($target -eq $cur) {
-            if ($gpoNote) { Add-Result 'AuditPolicy' $item 'Warning' $gpoNote (Format-AuditValue $cur) (Format-AuditValue $cur) }
-            else { Add-Result 'AuditPolicy' $item 'OK' (Format-AuditValue $cur) (Format-AuditValue $cur) (Format-AuditValue $cur) }
+        if ($gpo.ContainsKey($guid)) {
+            # Підкатегорію задає GPO: локальна зміна проживе лише до оновлення політик (на DC - хвилини), а кожне
+            # перетягування туди-назад дає по події 4719. Тож не змінюємо, лише повідомляємо, якщо GPO слабша за потрібне.
+            if (($gpo[$guid] -bor $want) -eq $gpo[$guid]) {
+                Add-Result 'AuditPolicy' $item 'OK' ('{0} (задано GPO)' -f (Format-AuditValue $gpo[$guid])) (Format-AuditValue $cur) (Format-AuditValue $cur)
+            }
+            else {
+                Add-Result 'AuditPolicy' $item 'Warning' ('GPO задає {0}, потрібно щонайменше {1} - змініть GPO (локально не змінюємо: GPO однаково поверне своє значення)' -f (Format-AuditValue $gpo[$guid]), (Format-AuditValue $want)) (Format-AuditValue $cur) (Format-AuditValue $cur)
+            }
             continue
         }
-        if ($AuditOnly) { Add-Result 'AuditPolicy' $item 'WouldChange' ('{0} -> {1} {2}' -f (Format-AuditValue $cur), (Format-AuditValue $target), $gpoNote) (Format-AuditValue $cur) (Format-AuditValue $target); continue }
+        if ($target -eq $cur) {
+            Add-Result 'AuditPolicy' $item 'OK' (Format-AuditValue $cur) (Format-AuditValue $cur) (Format-AuditValue $cur)
+            continue
+        }
+        if ($AuditOnly) { Add-Result 'AuditPolicy' $item 'WouldChange' ('{0} -> {1}' -f (Format-AuditValue $cur), (Format-AuditValue $target)) (Format-AuditValue $cur) (Format-AuditValue $target); continue }
         $wargs = @('/set', "/subcategory:{$guid}")
         if ($target -band 1) { $wargs += '/success:enable' }
         if ($target -band 2) { $wargs += '/failure:enable' }
@@ -825,8 +831,7 @@ function Invoke-AuditPolicy {
         $was = 0; if ($current.ContainsKey($guid)) { $was = $current[$guid] }
         if (($now -band $a.Pending) -eq $a.Pending) {
             $status = 'Changed'; $msg = '{0} -> {1}' -f (Format-AuditValue $was), (Format-AuditValue $now)
-            if ($gpo.ContainsKey($guid) -and (($gpo[$guid] -bor $a.Pending) -ne $gpo[$guid])) { $status = 'Warning'; $msg += '; GPO це перезапише - оновіть GPO' }
-            elseif ($gpo.Count -and -not $gpo.ContainsKey($guid)) {
+            if ($gpo.Count) {
                 # коли аудит надходить із GPO, Windows при оновленні політик замінює ВСЮ локальну політику аудиту
                 # вмістом GPO: підкатегорії, яких немає в GPO, повертаються до "Без аудиту" (на DC - за кілька хвилин)
                 $status = 'Warning'; $msg += '; тимчасово: доменна GPO аудиту скине це при оновленні політик - потрібна GPO (на DC її створює Start-SecLogging)'

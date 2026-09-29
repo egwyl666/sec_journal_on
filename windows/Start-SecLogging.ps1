@@ -7,7 +7,7 @@
     Запуск (PowerShell або cmd від імені адміністратора, потрібен інтернет). У рядку навмисно
     немає змінних ($): інакше PowerShell, у який його вставили, підставив би їх ще до запуску.
 
-      powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.2/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
 
     Що робить:
       1. Завантажує архів репозиторію з GitHub (або бере -Source).
@@ -49,7 +49,7 @@
 param(
     [switch]$AuditOnly,
     [string]$Source,
-    [string]$Ref = 'v1.3.2',
+    [string]$Ref = 'v1.3.3',
     [switch]$SkipSysmon,
     [switch]$NoGpo,
     [ValidateSet('10.42', '10.2')]
