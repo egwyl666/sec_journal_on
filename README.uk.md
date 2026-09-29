@@ -38,7 +38,7 @@ tests/                            тести (pwsh + docker)
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; $w=New-Object Net.WebClient; $w.Encoding=[Text.Encoding]::UTF8; & ([scriptblock]::Create($w.DownloadString('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1').TrimStart([char]0xFEFF)))"
 ```
 
-**Linux** (будь-який дистрибутив із таблиці нижче):
+**Linux** (будь-який дистрибутив із таблиці нижче; рядок використовує `curl`, а де його немає — `wget`, наприклад на Ubuntu Desktop):
 
 ```bash
 (curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh) | sudo bash
@@ -61,6 +61,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointMan
 | Детальний звіт | `C:\ProgramData\SecLogging\last-report.json` | `/var/log/seclogging/last-report.json` |
 
 Повторний запуск безпечний: змінюється лише те, чого бракує, і повторний запуск покаже `Змін немає`.
+
+Подивитися, що змінилося після запуску:
+
+```powershell
+# Windows (PowerShell)
+Get-Content (Get-ChildItem C:\ProgramData\SecLogging\changes\*-changes.txt | Sort-Object LastWriteTime | Select-Object -Last 1).FullName -Encoding UTF8
+```
+```bash
+# Linux
+sudo cat "$(ls -t /var/log/seclogging/changes/*-changes.txt | head -1)"
+```
+
+Приклад (Ubuntu, перший запуск):
+
+```
+[auditd.conf]
+  max_log_file
+      було:  (не задано)
+      стало: 100
+```
 
 Лише перевірка, нічого не змінювати:
 

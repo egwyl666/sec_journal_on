@@ -38,7 +38,7 @@ Open **PowerShell or cmd as administrator** (Windows) or a root shell (Linux), p
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; $w=New-Object Net.WebClient; $w.Encoding=[Text.Encoding]::UTF8; & ([scriptblock]::Create($w.DownloadString('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1').TrimStart([char]0xFEFF)))"
 ```
 
-**Linux** (any distribution from the table below):
+**Linux** (any distribution from the table below; the line uses `curl`, or `wget` where there is no `curl`, e.g. Ubuntu Desktop):
 
 ```bash
 (curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh) | sudo bash
@@ -61,6 +61,26 @@ Results:
 | Detailed report | `C:\ProgramData\SecLogging\last-report.json` | `/var/log/seclogging/last-report.json` |
 
 Running it again is safe: only what is missing changes, and a second run reports `Змін немає` (no changes).
+
+View what changed after a run:
+
+```powershell
+# Windows (PowerShell)
+Get-Content (Get-ChildItem C:\ProgramData\SecLogging\changes\*-changes.txt | Sort-Object LastWriteTime | Select-Object -Last 1).FullName -Encoding UTF8
+```
+```bash
+# Linux
+sudo cat "$(ls -t /var/log/seclogging/changes/*-changes.txt | head -1)"
+```
+
+Example (Ubuntu, first run):
+
+```
+[auditd.conf]
+  max_log_file
+      було:  (не задано)
+      стало: 100
+```
 
 Check only, change nothing:
 
