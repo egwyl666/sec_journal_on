@@ -70,7 +70,7 @@ Get-Content (Get-ChildItem C:\ProgramData\SecLogging\changes\*-changes.txt | Sor
 ```
 ```bash
 # Linux
-sudo cat "$(ls -t /var/log/seclogging/changes/*-changes.txt | head -1)"
+sudo sh -c 'cat "$(ls -t /var/log/seclogging/changes/*-changes.txt | head -1)"'
 ```
 
 Приклад (Ubuntu, перший запуск):
