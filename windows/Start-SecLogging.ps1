@@ -4,9 +4,10 @@
     Одна команда для будь-якої Windows: завантажує все потрібне, визначає тип машини й налаштовує журналювання.
 
 .DESCRIPTION
-    Запуск (PowerShell або cmd від імені адміністратора, потрібен інтернет):
+    Запуск (PowerShell або cmd від імені адміністратора, потрібен інтернет). У рядку навмисно
+    немає змінних ($): інакше PowerShell, у який його вставили, підставив би їх ще до запуску.
 
-      powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; $w=New-Object Net.WebClient; $w.Encoding=[Text.Encoding]::UTF8; & ([scriptblock]::Create($w.DownloadString('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1').TrimStart([char]0xFEFF)))"
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
 
     Що робить:
       1. Завантажує архів репозиторію з GitHub (або бере -Source).

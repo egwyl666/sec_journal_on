@@ -30,12 +30,12 @@ tests/                            tests (pwsh + docker)
 
 ## One command (no decisions needed)
 
-Open **PowerShell or cmd as administrator** (Windows) or a root shell (Linux), paste one line, and wait for `DONE`. The machine needs internet access.
+Open **PowerShell or cmd as administrator** (Windows; the same line works in both) or a root shell (Linux), paste one line, and wait for `DONE`. The machine needs internet access.
 
 **Windows** (10/11, Server 2008 R2 … 2025, domain controllers):
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; $w=New-Object Net.WebClient; $w.Encoding=[Text.Encoding]::UTF8; & ([scriptblock]::Create($w.DownloadString('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1').TrimStart([char]0xFEFF)))"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
 ```
 
 **Linux** (any distribution from the table below; the line uses `curl`, or `wget` where there is no `curl`, e.g. Ubuntu Desktop):
@@ -85,7 +85,7 @@ Example (Ubuntu, first run):
 Check only, change nothing:
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; $w=New-Object Net.WebClient; $w.Encoding=[Text.Encoding]::UTF8; & ([scriptblock]::Create($w.DownloadString('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1').TrimStart([char]0xFEFF))) -AuditOnly"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF))) -AuditOnly"
 ```
 ```bash
 (curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh) | sudo bash -s -- --check

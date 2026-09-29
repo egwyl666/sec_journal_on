@@ -30,12 +30,12 @@ tests/                            тести (pwsh + docker)
 
 ## Одна команда (без роздумів)
 
-Відкрийте **PowerShell або cmd від імені адміністратора** (Windows) чи root-консоль (Linux), вставте один рядок і дочекайтеся `ГОТОВО`. Потрібен інтернет.
+Відкрийте **PowerShell або cmd від імені адміністратора** (Windows; той самий рядок працює в обох) чи root-консоль (Linux), вставте один рядок і дочекайтеся `ГОТОВО`. Потрібен інтернет.
 
 **Windows** (10/11, Server 2008 R2 … 2025, контролери домену):
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; $w=New-Object Net.WebClient; $w.Encoding=[Text.Encoding]::UTF8; & ([scriptblock]::Create($w.DownloadString('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1').TrimStart([char]0xFEFF)))"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
 ```
 
 **Linux** (будь-який дистрибутив із таблиці нижче; рядок використовує `curl`, а де його немає — `wget`, наприклад на Ubuntu Desktop):
@@ -85,7 +85,7 @@ sudo sh -c 'cat "$(ls -t /var/log/seclogging/changes/*-changes.txt | head -1)"'
 Лише перевірка, нічого не змінювати:
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; $w=New-Object Net.WebClient; $w.Encoding=[Text.Encoding]::UTF8; & ([scriptblock]::Create($w.DownloadString('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1').TrimStart([char]0xFEFF))) -AuditOnly"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF))) -AuditOnly"
 ```
 ```bash
 (curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/HEAD/linux/install.sh) | sudo bash -s -- --check

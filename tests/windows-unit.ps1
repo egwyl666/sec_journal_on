@@ -355,6 +355,16 @@ $txt = [IO.File]::ReadAllText($to); $csvText = [IO.File]::ReadAllText([IO.Path]:
 Assert ($n -eq 7 -and $txt -match 'Змін: 7' -and $txt -match 'було:  Успіх' -and $csvText -match '^\W*Область;Елемент;Було;Стало') 'звіт .txt і .csv записано'
 Remove-Item $tb, $ta, $to, ([IO.Path]::ChangeExtension($to, '.csv')) -Force
 
+Write-Host 'Однорядкова команда в README'
+foreach ($rd in 'README.md', 'README.uk.md') {
+    $ol = @(Get-Content (Join-Path $root $rd) -Encoding UTF8 | Where-Object { $_ -like 'powershell -NoProfile -ExecutionPolicy Bypass -Command "*Start-SecLogging.ps1*' })
+    Assert ($ol.Count -ge 2 -and @($ol | Where-Object { $_ -match '\$' }).Count -eq 0) "${rd}: рядок без змінних (`$) - однаково працює в PowerShell і cmd"
+    $inner = ([regex]::Match($ol[0], '-Command "(.*)"')).Groups[1].Value
+    $t = $null; $e = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($inner, [ref]$t, [ref]$e)
+    Assert ($e.Count -eq 0) "${rd}: внутрішня команда розбирається без помилок"
+}
+
 Write-Host ''
 Write-Host "Пройдено: $script:passed  Не пройдено: $script:failed"
 if ($script:failed) { exit 1 }
