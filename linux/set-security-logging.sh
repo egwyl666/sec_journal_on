@@ -499,7 +499,7 @@ do_journald() {
     if [ "$storage" = "persistent" ] || { [ "${storage:-auto}" = "auto" ] && [ -d /var/log/journal ]; }; then persistent=1; fi
     [ "$persistent" -eq 0 ] && changes+="Storage=${storage:-auto}(volatile)->persistent "
     [ "$max_mb" -lt "$JOURNAL_MAX_MB" ] && changes+="SystemMaxUse=${max:-default}->${JOURNAL_MAX_MB}M "
-    if [ -z "$changes" ]; then result journald journald.conf OK "Storage=${storage:-auto} persistent, SystemMaxUse=${max}"; return; fi
+    if [ -z "$changes" ]; then result journald journald.conf OK "Storage=${storage:-auto}$([ "${storage:-auto}" = persistent ] || echo " (є /var/log/journal - на диску)"), SystemMaxUse=${max}"; return; fi
     if [ "$CHECK" -eq 1 ]; then result journald journald.conf WouldChange "$changes"; return; fi
     local want=$JOURNAL_MAX_MB; [ "$max_mb" -gt "$want" ] && want=$max_mb
     mkdir -p "$(dirname "$JOURNALD_DROPIN")" /var/log/journal
