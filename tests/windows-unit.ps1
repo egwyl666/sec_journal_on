@@ -299,6 +299,15 @@ Assert ($ev.Count -eq 2 -and $ev[0].Id -eq 1 -and $ev[1].Id -eq 1001 -and $ev[1]
 Assert ((ConvertTo-ConsoleText 'Підсумок: OK, звіт Їжак' -Force) -eq 'Pidsumok: OK, zvit Yizhak') 'транслітерація для консолі без кирилиці'
 Assert ((ConvertTo-ConsoleText 'Підсумок') -eq 'Підсумок') 'без потреби текст не змінюється'
 
+Write-Host 'Wazuh agent.conf відповідає списку каналів'
+$std = @('Security', 'System', 'Application')
+foreach ($g in @(@{ File = 'windows'; Dc = $false }, @{ File = 'windows-dc'; Dc = $true })) {
+    $want = @($s.Channels | Where-Object { [bool]$_.DC -eq $g.Dc -and -not $_.NoWazuh -and $std -notcontains $_.N } | ForEach-Object { $_.N })
+    $have = @(([xml]('<r>' + (Get-Content -Raw (Join-Path $root "wazuh/shared/$($g.File)/agent.conf") -Encoding UTF8) + '</r>')).r.agent_config.localfile | ForEach-Object { $_.location })
+    Assert ((($want -join '|') -eq ($have -join '|'))) "wazuh/shared/$($g.File)/agent.conf: ті самі канали й порядок [$(@(Compare-Object $want $have | ForEach-Object { $_.InputObject }) -join ', ')]"
+}
+Assert (@($s.AuditPolicy | Where-Object { $_.Guid -like '0CCE9221-*' -and $_.Workstation -eq 0 -and $_.DomainController -eq 3 }).Count -eq 1) 'аудит Certification Services (AD CS) на серверах і DC'
+
 Write-Host ''
 Write-Host "Пройдено: $script:passed  Не пройдено: $script:failed"
 if ($script:failed) { exit 1 }

@@ -246,10 +246,14 @@ function Get-SecLoggingSettings {
         @{ N = 'Microsoft-Windows-Security-Mitigations/KernelMode'; C = 'Other' }
         @{ N = 'Microsoft-Windows-Security-Mitigations/UserMode'; C = 'Other' }
         @{ N = 'Microsoft-Windows-LSA/Operational'; C = 'Other' }
+        @{ N = 'Microsoft-Windows-Shell-Core/Operational'; C = 'Other' }
+        @{ N = 'Microsoft-Windows-GroupPolicy/Operational'; C = 'Other' }
+        @{ N = 'Microsoft-Windows-LAPS/Operational'; C = 'Other' }
         @{ N = 'Directory Service'; C = 'DirSvc'; DC = $true }
         @{ N = 'DNS Server'; C = 'Other'; DC = $true }
         @{ N = 'Microsoft-Windows-DNSServer/Audit'; C = 'Other'; DC = $true }
         @{ N = 'DFS Replication'; C = 'Other'; DC = $true }
+        @{ N = 'Active Directory Web Services'; C = 'Other'; DC = $true }
     )
 
     # Advanced Audit Policy за GUID підкатегорії (не залежить від мови ОС).
@@ -286,6 +290,7 @@ function Get-SecLoggingSettings {
         'Detailed File Share|9244|2|2|2'
         'Removable Storage|9245|3|3|3'
         'Other Object Access Events|9227|3|3|3'
+        'Certification Services|9221|0|3|3'
         # --- Policy Change
         'Audit Policy Change|922F|3|3|3'
         'Authentication Policy Change|9230|1|1|1'
@@ -791,6 +796,11 @@ function Invoke-RegistrySettings {
     param($Settings, [string]$RoleName)
     $items = @()
     foreach ($r in $Settings.Registry) { if (-not $r.DC -or $RoleName -eq 'DomainController') { $items += $r } }
+    # Центр сертифікації (AD CS): без AuditFilter CA не пише подій 4886-4899 навіть за увімкненого аудиту
+    $ca = Get-RegValue 'SYSTEM\CurrentControlSet\Services\CertSvc\Configuration' 'Active'
+    if ($ca) {
+        $items += @{ Path = "SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$ca"; Name = 'AuditFilter'; Type = 'DWord'; Value = 127; Mode = 'Min'; Why = 'Аудит CA (4886-4899); діє після перезапуску служби certsvc' }
+    }
     if ($TranscriptionPath) {
         $t = 'SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription'
         $items += @{ Path = $t; Name = 'EnableTranscripting'; Type = 'DWord'; Value = 1; Mode = 'Min'; Why = 'PowerShell Transcription' }
