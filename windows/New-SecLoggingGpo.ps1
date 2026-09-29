@@ -134,14 +134,20 @@ function Update-GpoFiles {
     $gpoPath = "\\$DcName\SYSVOL\$DomainDns\Policies\{$($Gpo.Id)}"
     $auditDir = Join-Path $gpoPath 'Machine\Microsoft\Windows NT\Audit'
     $scriptDir = Join-Path $gpoPath 'Machine\Scripts'
+    $auditFile = Join-Path $auditDir 'audit.csv'
+    $scriptsFile = Join-Path $scriptDir 'scripts.ini'
+    $de = [ADSI]"LDAP://$DcName/CN={$($Gpo.Id)},CN=Policies,CN=System,$((Get-ADDomain).DistinguishedName)"
+    $curExt = [string]$de.Properties['gPCMachineExtensionNames'].Value
+    $ext = Merge-GpoExtensionNames $curExt @($CseRegistry, $CseScripts, $CseAudit)
+    # нічого не змінилося - версію не піднімаємо, інакше всі машини домену щоразу заново застосовують GPO
+    if ((Test-GpoFileSame $auditFile $AuditCsv) -and (Test-GpoFileSame $scriptsFile $ScriptsIni) -and $ext -eq $curExt.ToUpper()) { return $false }
+
     New-Item -ItemType Directory -Path $auditDir -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $scriptDir 'Startup') -Force | Out-Null
-    [IO.File]::WriteAllLines((Join-Path $auditDir 'audit.csv'), [string[]]$AuditCsv, (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllLines($auditFile, [string[]]$AuditCsv, (New-Object Text.UTF8Encoding($false)))
     # scripts.ini має бути в UTF-16 LE
-    [IO.File]::WriteAllLines((Join-Path $scriptDir 'scripts.ini'), [string[]]$ScriptsIni, [Text.Encoding]::Unicode)
+    [IO.File]::WriteAllLines($scriptsFile, [string[]]$ScriptsIni, [Text.Encoding]::Unicode)
 
-    $de = [ADSI]"LDAP://$DcName/CN={$($Gpo.Id)},CN=Policies,CN=System,$((Get-ADDomain).DistinguishedName)"
-    $ext = Merge-GpoExtensionNames ([string]$de.Properties['gPCMachineExtensionNames'].Value) @($CseRegistry, $CseScripts, $CseAudit)
     $version = [int]$de.Properties['versionNumber'].Value + 1   # молодше слово = версія комп'ютерної частини
     $de.Properties['gPCMachineExtensionNames'].Value = $ext
     $de.Properties['versionNumber'].Value = $version
@@ -152,15 +158,37 @@ function Update-GpoFiles {
     if ($content -match '^Version=') { $content = $content -replace '^Version=\d+', "Version=$version" }
     else { $content += "Version=$version" }
     Set-Content -LiteralPath $gptIni -Value $content -Encoding ASCII
+    $true
+}
+
+function Test-GpoFileSame {
+    # Чи вже має файл GPO такий самий вміст (кодування визначає BOM; порівнюються рядки)
+    param([string]$Path, [string[]]$Lines)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $cur = @([IO.File]::ReadAllLines($Path))
+    ($cur -join "`n") -ceq (@($Lines) -join "`n")
+}
+
+function Test-GpoValueSame {
+    # Значення з Get-GPRegistryValue збігається з потрібним (тип і значення)
+    param($Current, $Item)
+    if (-not $Current) { return $false }
+    ([string]$Current.Type -eq [string]$Item.Type) -and ([string]$Current.Value -ceq [string]$Item.Value)
 }
 
 function Set-GpoRegistryList {
     param([string]$GpoName, $Items, [string]$DcName)
+    $changed = 0
     foreach ($i in $Items) {
+        # кожен Set-GPRegistryValue піднімає версію GPO, тож однакові значення не перезаписуємо
+        $cur = Get-GPRegistryValue -Name $GpoName -Key $i.Key -ValueName $i.Name -Server $DcName -ErrorAction SilentlyContinue
+        if (Test-GpoValueSame $cur $i) { continue }
         $params = @{ Name = $GpoName; Key = $i.Key; ValueName = $i.Name; Type = $i.Type; Value = $i.Value; Server = $DcName }
         Set-GPRegistryValue @params | Out-Null
         Write-Host ("    {0}\{1} = {2}" -f $i.Key, $i.Name, $i.Value)
+        $changed++
     }
+    if (-not $changed) { Write-Host '    політики реєстру: без змін' }
 }
 
 function Get-OrNewGpo {
@@ -310,8 +338,10 @@ foreach ($g in @(
     # Базовий audit.csv використовує набір робочої станції (рядові сервери отримують той самий; відрізняється лише File Share).
     # GPO для DC містить повний набір DC, тож результат коректний незалежно від того, чи об'єднуються файли audit.csv.
     $csv = New-AuditCsv $settings.AuditPolicy $g.Role
-    Update-GpoFiles -Gpo $gpo -AuditCsv $csv -ScriptsIni $scriptsIni -DcName $dcName -DomainDns $domainDns
-    Write-Host "    audit.csv: підкатегорій $($csv.Count - 1); startup-скрипт налаштовано"
+    if (Update-GpoFiles -Gpo $gpo -AuditCsv $csv -ScriptsIni $scriptsIni -DcName $dcName -DomainDns $domainDns) {
+        Write-Host "    audit.csv: підкатегорій $($csv.Count - 1); startup-скрипт налаштовано"
+    }
+    else { Write-Host "    audit.csv і startup-скрипт: без змін" }
     foreach ($t in $g.Links) { Add-GpoLinkOnce $g.Name $t $dcName }
 }
 

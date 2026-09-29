@@ -128,6 +128,20 @@ $dcCsv = New-AuditCsv $s.AuditPolicy 'DomainController'
 $wsCsv = New-AuditCsv $s.AuditPolicy 'Workstation'
 Assert ($dcCsv[0] -like 'Machine Name,*') 'заголовок audit.csv'
 Assert (@($dcCsv | Where-Object { $_ -like '*{0cce923b-*' }).Count -eq 1 -and @($wsCsv | Where-Object { $_ -like '*{0cce923b-*' }).Count -eq 0) 'DS Access лише в audit.csv для DC'
+# повторний запуск New-SecLoggingGpo не повинен піднімати версію GPO, якщо нічого не змінилося
+$gf = Join-Path ([IO.Path]::GetTempPath()) ('gpo-' + [guid]::NewGuid())
+Assert (-not (Test-GpoFileSame $gf $dcCsv)) 'відсутній файл GPO - треба записати'
+[IO.File]::WriteAllLines($gf, [string[]]$dcCsv, (New-Object Text.UTF8Encoding($false)))
+Assert (Test-GpoFileSame $gf $dcCsv) 'той самий audit.csv - без змін'
+Assert (-not (Test-GpoFileSame $gf $wsCsv)) 'інший audit.csv - треба записати'
+$si = New-ScriptsIni 'powershell.exe' '-File x.ps1'
+[IO.File]::WriteAllLines($gf, [string[]]$si, [Text.Encoding]::Unicode)
+Assert (Test-GpoFileSame $gf $si) 'scripts.ini у UTF-16 з порожнім першим рядком - без змін'
+Remove-Item -LiteralPath $gf
+Assert (Test-GpoValueSame ([pscustomobject]@{ Type = [Microsoft.Win32.RegistryValueKind]::DWord; Value = [uint32]8 }) @{ Type = 'DWord'; Value = 8 }) 'значення GPO DWord 8 = 8 - не перезаписується'
+Assert (-not (Test-GpoValueSame ([pscustomobject]@{ Type = [Microsoft.Win32.RegistryValueKind]::DWord; Value = [uint32]1 }) @{ Type = 'DWord'; Value = 2 })) 'інше значення - перезаписується'
+Assert (-not (Test-GpoValueSame ([pscustomobject]@{ Type = [Microsoft.Win32.RegistryValueKind]::String; Value = '1' }) @{ Type = 'DWord'; Value = 1 })) 'інший тип - перезаписується'
+Assert (-not (Test-GpoValueSame $null @{ Type = 'DWord'; Value = 1 })) 'значення немає - записується'
 Assert (@($dcCsv | Select-Object -Skip 1 | Where-Object { $_ -notmatch '^,System,Audit .+,\{[0-9a-f-]{36}\},(Success|Failure|Success and Failure),,[123]$' }).Count -eq 0) 'рядки audit.csv мають правильний формат'
 $back = ConvertFrom-AuditCsv $dcCsv
 Assert ($back['0CCE9242-69AE-11D9-BED3-505054503030'] -eq 3) 'audit.csv розбирається тим самим парсером'
