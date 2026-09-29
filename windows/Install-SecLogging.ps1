@@ -92,6 +92,60 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+#region ---------------------------------------------------------------- вивід у консоль
+# PowerShell 2.0 в англійській Windows виводить кирилицю як "????" (кодова сторінка консолі 437).
+# Тоді текст для консолі транслітерується латиницею; JSON-звіт і журнал подій лишаються українською.
+
+$Script:NeedTranslit = $false
+if ($PSVersionTable.PSVersion.Major -lt 3) {
+    try {
+        $probe = [string][char]0x0456 + [char]0x0457 + [char]0x0454 + [char]0x0436
+        $enc = [Console]::OutputEncoding
+        $Script:NeedTranslit = ($enc.GetString($enc.GetBytes($probe)) -ne $probe)
+    }
+    catch { $Script:NeedTranslit = $false }
+}
+
+function Get-TranslitMap {
+    if ($Script:TranslitMap) { return $Script:TranslitMap }
+    $map = New-Object System.Collections.Hashtable ([System.StringComparer]::Ordinal)
+    foreach ($pair in ('А=A Б=B В=V Г=H Ґ=G Д=D Е=E Є=Ye Ж=Zh З=Z И=Y І=I Ї=Yi Й=Y К=K Л=L М=M Н=N О=O П=P Р=R С=S Т=T У=U Ф=F Х=Kh Ц=Ts Ч=Ch Ш=Sh Щ=Shch Ь= Ю=Yu Я=Ya Ё=Yo Ы=Y Э=E Ъ=' -split ' ')) {
+        $kv = $pair.Split('=')
+        $map[$kv[0]] = $kv[1]
+        $map[$kv[0].ToLower()] = $kv[1].ToLower()
+    }
+    $map[[string][char]0x02BC] = "'"
+    $Script:TranslitMap = $map
+    $map
+}
+
+function ConvertTo-ConsoleText {
+    param([string]$Text, [switch]$Force)
+    if ((-not $Script:NeedTranslit -and -not $Force) -or -not $Text) { return $Text }
+    $map = Get-TranslitMap
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $Text.ToCharArray()) {
+        $k = [string]$ch
+        if ($map.ContainsKey($k)) { [void]$sb.Append($map[$k]) } else { [void]$sb.Append($ch) }
+    }
+    $sb.ToString()
+}
+
+function Write-Host {
+    # Заміна Write-Host у межах скрипта: транслітерація за потреби; вивід через $Host.UI (без рекурсії)
+    param([Parameter(Position = 0, ValueFromRemainingArguments = $true)]$Object, [ConsoleColor]$ForegroundColor, [switch]$NoNewline)
+    $text = ConvertTo-ConsoleText ((@($Object) | ForEach-Object { [string]$_ }) -join ' ')
+    if ($PSBoundParameters.ContainsKey('ForegroundColor')) {
+        if ($NoNewline) { $Host.UI.Write($ForegroundColor, $Host.UI.RawUI.BackgroundColor, $text) }
+        else { $Host.UI.WriteLine($ForegroundColor, $Host.UI.RawUI.BackgroundColor, $text) }
+    }
+    elseif ($NoNewline) { $Host.UI.Write($text) }
+    else { $Host.UI.WriteLine($text) }
+}
+
+#endregion
+
 $InstallerPath = $MyInvocation.MyCommand.Path
 $InstallerDir = Split-Path -Parent $InstallerPath
 $WorkDir = Join-Path $env:ProgramData 'SecLogging'
