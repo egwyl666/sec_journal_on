@@ -1,7 +1,7 @@
 <!--
   Правила оповіщень для подій, які вмикає sec_journal_on (Windows і Linux).
   Встановлення на менеджері: скопіюйте файл у /var/ossec/etc/rules/ і перезапустіть wazuh-manager.
-  Діапазон ID: 110000-110199 (Windows 110000-110099, Linux 110100-110199).
+  Діапазон ID: 12300-12343 (спершу Windows, далі Linux).
 
   Кожне правило прив'язане (if_sid) до найглибшого стандартного правила, до якого доходить подія:
   Wazuh перевіряє дочірні правила в порядку завантаження й іде за першим, що збіглося, тож правило,
@@ -15,7 +15,7 @@
 
   <!-- ===== Захист журналів і аудиту ===== -->
 
-  <rule id="110001" level="12">
+  <rule id="12300" level="12">
     <if_sid>63103</if_sid>
     <field name="win.system.channel">^Security$</field>
     <field name="win.system.eventID">^1102$</field>
@@ -25,7 +25,7 @@
     <group>log_cleared,</group>
   </rule>
 
-  <rule id="110002" level="10">
+  <rule id="12301" level="10">
     <if_sid>63104</if_sid>
     <field name="win.system.eventID">^104$</field>
     <field name="win.system.providerName">Eventlog</field>
@@ -35,7 +35,7 @@
     <group>log_cleared,</group>
   </rule>
 
-  <rule id="110003" level="10">
+  <rule id="12302" level="10">
     <if_sid>63108</if_sid>
     <field name="win.system.channel">^Security$</field>
     <field name="win.system.eventID">^1100$</field>
@@ -44,7 +44,7 @@
     <mitre><id>T1562.002</id></mitre>
   </rule>
 
-  <rule id="110004" level="10">
+  <rule id="12303" level="10">
     <if_sid>60103</if_sid>
     <field name="win.system.channel">^Security$</field>
     <field name="win.system.eventID">^4719$</field>
@@ -55,7 +55,7 @@
 
   <!-- ===== Sysmon і сам SecLogging ===== -->
 
-  <rule id="110010" level="12">
+  <rule id="12304" level="12">
     <if_sid>61606</if_sid>
     <field name="win.system.channel">^Microsoft-Windows-Sysmon/Operational$</field>
     <field name="win.system.eventID">^4$</field>
@@ -65,7 +65,7 @@
     <mitre><id>T1562.001</id></mitre>
   </rule>
 
-  <rule id="110011" level="10">
+  <rule id="12305" level="10">
     <if_sid>61644</if_sid>
     <field name="win.system.channel">^Microsoft-Windows-Sysmon/Operational$</field>
     <field name="win.system.eventID">^16$</field>
@@ -74,21 +74,21 @@
     <mitre><id>T1562.001</id></mitre>
   </rule>
 
-  <rule id="110012" level="10">
+  <rule id="12306" level="10">
     <if_sid>60602</if_sid>
     <field name="win.system.providerName">^SecLogging$</field>
     <field name="win.system.eventID">^1002$</field>
     <description>SecLogging: не вдалося застосувати налаштування журналювання - див. last-report.json на хості</description>
   </rule>
 
-  <rule id="110013" level="4">
+  <rule id="12307" level="4">
     <if_sid>60601</if_sid>
     <field name="win.system.providerName">^SecLogging$</field>
     <field name="win.system.eventID">^1001$</field>
     <description>SecLogging: налаштування застосовано з попередженнями</description>
   </rule>
 
-  <rule id="110014" level="3">
+  <rule id="12308" level="3">
     <if_sid>60600</if_sid>
     <field name="win.system.providerName">^SecLogging$</field>
     <field name="win.system.eventID">^1000$</field>
@@ -97,7 +97,7 @@
 
   <!-- ===== Закріплення: служби ===== -->
 
-  <rule id="110020" level="8">
+  <rule id="12309" level="8">
     <if_sid>60103</if_sid>
     <field name="win.system.channel">^Security$</field>
     <field name="win.system.eventID">^4697$</field>
@@ -106,7 +106,7 @@
     <mitre><id>T1543.003</id></mitre>
   </rule>
 
-  <rule id="110021" level="8">
+  <rule id="12310" level="8">
     <if_sid>61100</if_sid>
     <field name="win.system.channel">^System$</field>
     <field name="win.system.eventID">^7045$</field>
@@ -119,7 +119,7 @@
   <!-- 512 Domain Admins, 518 Schema Admins, 519 Enterprise Admins, 520 Group Policy Creator Owners,
        S-1-5-32-544 Administrators, 548 Account Operators, 549 Server Operators, 550 Print Operators, 551 Backup Operators -->
 
-  <rule id="110030" level="12">
+  <rule id="12311" level="12">
     <if_sid>60103</if_sid>
     <field name="win.system.channel">^Security$</field>
     <field name="win.system.eventID">^4728$|^4732$|^4756$</field>
@@ -131,7 +131,7 @@
 
   <!-- ===== Атаки на AD ===== -->
 
-  <rule id="110040" level="14">
+  <rule id="12312" level="14">
     <if_sid>60103</if_sid>
     <field name="win.system.channel">^Security$</field>
     <field name="win.system.eventID">^4662$</field>
@@ -142,7 +142,7 @@
     <mitre><id>T1003.006</id></mitre>
   </rule>
 
-  <rule id="110041" level="10">
+  <rule id="12313" level="10">
     <if_sid>60103</if_sid>
     <field name="win.system.channel">^Security$</field>
     <field name="win.system.eventID">^4769$</field>
@@ -154,7 +154,7 @@
     <mitre><id>T1558.003</id></mitre>
   </rule>
 
-  <rule id="110042" level="10">
+  <rule id="12314" level="10">
     <if_sid>60103</if_sid>
     <field name="win.system.channel">^Security$</field>
     <field name="win.system.eventID">^4768$</field>
@@ -165,7 +165,7 @@
     <mitre><id>T1558.004</id></mitre>
   </rule>
 
-  <rule id="110043" level="12">
+  <rule id="12315" level="12">
     <if_sid>60103</if_sid>
     <field name="win.system.channel">^Security$</field>
     <field name="win.system.eventID">^4794$</field>
@@ -174,7 +174,7 @@
     <mitre><id>T1098</id></mitre>
   </rule>
 
-  <rule id="110044" level="8">
+  <rule id="12316" level="8">
     <if_sid>60103</if_sid>
     <field name="win.system.channel">^Security$</field>
     <field name="win.system.eventID">^5136$</field>
@@ -184,7 +184,7 @@
     <mitre><id>T1484.001</id></mitre>
   </rule>
 
-  <rule id="110045" level="5">
+  <rule id="12317" level="5">
     <if_sid>60009, 60010, 60011</if_sid>
     <field name="win.system.channel">^Directory Service$</field>
     <field name="win.system.eventID">^2889$</field>
@@ -195,7 +195,7 @@
 
   <!-- ===== LSASS ===== -->
 
-  <rule id="110050" level="10">
+  <rule id="12318" level="10">
     <if_sid>60009, 60010, 60011</if_sid>
     <field name="win.system.channel">^Microsoft-Windows-CodeIntegrity/Operational$</field>
     <field name="win.system.eventID">^3065$|^3066$</field>
@@ -206,109 +206,129 @@
 
 </group>
 
+<group name="windows,service_installation,lunette,">
+
+  <!-- Служба з каталогу, куди може писати користувач. Дочірні до правил 4697/7045 вище:
+       окреме базове правило на 4697 не спрацювало б - подію першим забирає правило "Встановлено службу". -->
+  <rule id="12319" level="12">
+    <if_sid>12309</if_sid>
+    <field name="win.eventdata.serviceFileName" type="pcre2">(?i)\\(users|temp|appdata|programdata|downloads|пользователи)\\</field>
+    <description>Windows: служба з підозрілого каталогу - $(win.eventdata.serviceFileName)</description>
+    <mitre><id>T1543.003</id></mitre>
+  </rule>
+
+  <rule id="12320" level="12">
+    <if_sid>12310</if_sid>
+    <field name="win.eventdata.imagePath" type="pcre2">(?i)\\(users|temp|appdata|programdata|downloads|пользователи)\\</field>
+    <description>Windows: служба з підозрілого каталогу - $(win.eventdata.imagePath)</description>
+    <mitre><id>T1543.003</id></mitre>
+  </rule>
+
+</group>
+
 <group name="seclogging,seclogging_linux,">
 
   <!-- ===== auditd: ключі правил з set-security-logging.sh ===== -->
 
-  <rule id="110100" level="12">
+  <rule id="12321" level="12">
     <if_sid>80700</if_sid>
     <field name="audit.key">^auditlog$</field>
     <description>Auditd: зміна журналів аудиту /var/log/audit ($(audit.exe))</description>
     <mitre><id>T1070.002</id></mitre>
   </rule>
 
-  <rule id="110101" level="10">
+  <rule id="12322" level="10">
     <if_sid>80700</if_sid>
     <field name="audit.key">^auditconfig$</field>
     <description>Auditd: змінено конфігурацію аудиту ($(audit.exe))</description>
     <mitre><id>T1562.012</id></mitre>
   </rule>
 
-  <rule id="110102" level="6">
+  <rule id="12323" level="6">
     <if_sid>80700</if_sid>
     <field name="audit.key">^audittools$</field>
     <description>Auditd: запущено auditctl/auditd ($(audit.exe))</description>
     <mitre><id>T1562.012</id></mitre>
   </rule>
 
-  <rule id="110103" level="12">
+  <rule id="12324" level="12">
     <if_sid>80700</if_sid>
     <field name="audit.key">^rootkey$</field>
     <description>Auditd: змінено ключі SSH користувача root ($(audit.exe))</description>
     <mitre><id>T1098.004</id></mitre>
   </rule>
 
-  <rule id="110104" level="12">
+  <rule id="12325" level="12">
     <if_sid>80700</if_sid>
     <field name="audit.key">^preload$</field>
     <description>Auditd: змінено ld.so.preload / ld.so.conf ($(audit.exe))</description>
     <mitre><id>T1574.006</id></mitre>
   </rule>
 
-  <rule id="110105" level="12">
+  <rule id="12326" level="12">
     <if_sid>80700</if_sid>
     <field name="audit.key">^webshell$</field>
     <description>Auditd: веб-сервер запустив програму ($(audit.exe)) - можливий веб-шел</description>
     <mitre><id>T1505.003</id></mitre>
   </rule>
 
-  <rule id="110106" level="10">
+  <rule id="12327" level="10">
     <if_sid>80700</if_sid>
     <field name="audit.key">^sudoers$</field>
     <description>Auditd: змінено sudoers ($(audit.exe))</description>
     <mitre><id>T1548.003</id></mitre>
   </rule>
 
-  <rule id="110107" level="10">
+  <rule id="12328" level="10">
     <if_sid>80700</if_sid>
     <field name="audit.key">^pam$</field>
     <description>Auditd: змінено налаштування PAM ($(audit.exe))</description>
     <mitre><id>T1556.003</id></mitre>
   </rule>
 
-  <rule id="110108" level="10">
+  <rule id="12329" level="10">
     <if_sid>80700</if_sid>
     <field name="audit.key">^code_injection$</field>
     <description>Auditd: запис у пам'ять іншого процесу через ptrace ($(audit.exe))</description>
     <mitre><id>T1055.008</id></mitre>
   </rule>
 
-  <rule id="110109" level="8">
+  <rule id="12330" level="8">
     <if_sid>80700</if_sid>
     <field name="audit.key">^identity$</field>
     <description>Auditd: змінено облікові записи або групи (passwd/shadow/group) ($(audit.exe))</description>
     <mitre><id>T1136.001</id></mitre>
   </rule>
 
-  <rule id="110110" level="8">
+  <rule id="12331" level="8">
     <if_sid>80700</if_sid>
     <field name="audit.key">^user_mgmt$</field>
     <description>Auditd: керування користувачами ($(audit.exe))</description>
     <mitre><id>T1136.001</id></mitre>
   </rule>
 
-  <rule id="110111" level="8">
+  <rule id="12332" level="8">
     <if_sid>80700</if_sid>
     <field name="audit.key">^sshd$</field>
     <description>Auditd: змінено конфігурацію sshd ($(audit.exe))</description>
     <mitre><id>T1098.004</id></mitre>
   </rule>
 
-  <rule id="110112" level="8">
+  <rule id="12333" level="8">
     <if_sid>80700</if_sid>
     <field name="audit.key">^cron$</field>
     <description>Auditd: змінено завдання cron/at ($(audit.exe))</description>
     <mitre><id>T1053.003</id></mitre>
   </rule>
 
-  <rule id="110113" level="8">
+  <rule id="12334" level="8">
     <if_sid>80700</if_sid>
     <field name="audit.key">^shellprofile$</field>
     <description>Auditd: змінено профіль оболонки ($(audit.exe))</description>
     <mitre><id>T1546.004</id></mitre>
   </rule>
 
-  <rule id="110114" level="8">
+  <rule id="12335" level="8">
     <if_sid>80700</if_sid>
     <field name="audit.key">^login$</field>
     <description>Auditd: змінено login.defs / nsswitch.conf ($(audit.exe))</description>
@@ -316,34 +336,34 @@
   </rule>
 
   <!-- часто змінюються оновленнями пакетів: низький рівень, для розслідувань -->
-  <rule id="110115" level="5">
+  <rule id="12336" level="5">
     <if_sid>80700</if_sid>
     <field name="audit.key">^systemd$|^init$</field>
     <description>Auditd: змінено служби systemd/init ($(audit.exe))</description>
     <mitre><id>T1543.002</id></mitre>
   </rule>
 
-  <rule id="110116" level="5">
+  <rule id="12337" level="5">
     <if_sid>80700</if_sid>
     <field name="audit.key">^modules$</field>
     <description>Auditd: завантаження або вивантаження модуля ядра ($(audit.exe))</description>
     <mitre><id>T1547.006</id></mitre>
   </rule>
 
-  <rule id="110117" level="5">
+  <rule id="12338" level="5">
     <if_sid>80700</if_sid>
     <field name="audit.key">^time$</field>
     <description>Auditd: змінено системний час ($(audit.exe))</description>
     <mitre><id>T1070.006</id></mitre>
   </rule>
 
-  <rule id="110118" level="5">
+  <rule id="12339" level="5">
     <if_sid>80700</if_sid>
     <field name="audit.key">^passwd_change$</field>
     <description>Auditd: запущено passwd ($(audit.exe))</description>
   </rule>
 
-  <rule id="110119" level="3">
+  <rule id="12340" level="3">
     <if_sid>80700</if_sid>
     <field name="audit.key">^netconf$|^mount$|^priv_esc$</field>
     <description>Auditd: $(audit.key) ($(audit.exe))</description>
@@ -355,20 +375,20 @@
 
   <!-- помилки перевіряються раніше за попередження: спрацьовує перше дочірнє правило, що збіглося -->
   <!-- підсумок set-security-logging.sh (logger -t seclogging) містить "Error=", тож стандартне 1002 спрацьовує завжди -->
-  <rule id="110150" level="3">
+  <rule id="12341" level="3">
     <if_sid>1002</if_sid>
     <program_name>^seclogging$</program_name>
     <description>SecLogging: налаштування застосовано</description>
   </rule>
 
-  <rule id="110152" level="10">
-    <if_sid>110150</if_sid>
+  <rule id="12342" level="10">
+    <if_sid>12341</if_sid>
     <match type="pcre2">\bError=[1-9]</match>
     <description>SecLogging: не вдалося застосувати налаштування журналювання - див. /var/log/seclogging/last-report.json</description>
   </rule>
 
-  <rule id="110151" level="4">
-    <if_sid>110150</if_sid>
+  <rule id="12343" level="4">
+    <if_sid>12341</if_sid>
     <match type="pcre2">\bWarning=[1-9]</match>
     <description>SecLogging: налаштування застосовано з попередженнями</description>
   </rule>

@@ -10,7 +10,12 @@ for name, want, q, loc, ev in cases:
     s.send(f"{q}:[001] (DC01) any->{loc}:{ev}".encode())
     time.sleep(0.05)
 time.sleep(5)
-got = [json.loads(l) for l in alerts if l.strip()]
+got = []
+for line in alerts:
+    try:
+        got.append(json.loads(line))
+    except ValueError:
+        pass   # рядок, який Wazuh саме дописував у момент seek, або порожній
 
 
 def key_of(a):
@@ -32,7 +37,7 @@ for a in got:
 fail = 0
 for name, want, *_ in cases:
     rules = by.get(name, [])
-    ours = [r for r in rules if r["id"].startswith(("1100", "1101"))]
+    ours = [r for r in rules if 12300 <= int(r["id"]) <= 12399]
     shown = ", ".join(f"{r['id']}/{r['level']}" for r in rules) or "немає алерту"
     ok = (want == "-" and not ours) or (want != "-" and any(r["id"] == want for r in rules))
     if not ok:
