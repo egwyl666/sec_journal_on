@@ -45,6 +45,10 @@
     Додати записи SACL на корінь домену, щоб 4662 фіксувалася для DCSync
     (розширені права реплікації) і для змін DACL/власника.
 
+.PARAMETER Server
+    DC, на якому редагуються GPO. Типово - емулятор PDC (так само робить консоль GPMC), незалежно від того,
+    на якому DC запущено скрипт: правки з різних DC не розходяться, поки реплікація SYSVOL відстає.
+
 .EXAMPLE
     .\New-SecLoggingGpo.ps1 -PackagePath D:\SecLogging -WhatIf
 .EXAMPLE
@@ -63,7 +67,8 @@ param(
     [ValidateSet('10.42', '10.2')]
     [string]$LegacySysmonVersion = '10.42',
     [string]$TranscriptionPath,
-    [switch]$SetDomainRootSacl
+    [switch]$SetDomainRootSacl,
+    [string]$Server
 )
 
 $ErrorActionPreference = 'Stop'
@@ -181,7 +186,9 @@ function Set-GpoRegistryList {
     $changed = 0
     foreach ($i in $Items) {
         # кожен Set-GPRegistryValue піднімає версію GPO, тож однакові значення не перезаписуємо
-        $cur = Get-GPRegistryValue -Name $GpoName -Key $i.Key -ValueName $i.Name -Server $DcName -ErrorAction SilentlyContinue
+        # значення чи ключа ще немає в GPO: Get-GPRegistryValue кидає виняток, який -ErrorAction не гасить
+        $cur = $null
+        try { $cur = Get-GPRegistryValue -Name $GpoName -Key $i.Key -ValueName $i.Name -Server $DcName -ErrorAction Stop } catch { $cur = $null }
         if (Test-GpoValueSame $cur $i) { continue }
         $params = @{ Name = $GpoName; Key = $i.Key; ValueName = $i.Name; Type = $i.Type; Value = $i.Value; Server = $DcName }
         Set-GPRegistryValue @params | Out-Null
@@ -191,10 +198,32 @@ function Set-GpoRegistryList {
     if (-not $changed) { Write-Host '    політики реєстру: без змін' }
 }
 
+function Test-SysvolFile { param([string]$Path) Test-Path -LiteralPath $Path }
+
+function Assert-GpoSysvol {
+    # Об'єкт GPO в AD є, а теки в SYSVOL цього DC немає - отже реплікація SYSVOL (DFSR) між DC не працює.
+    # Редагувати таку GPO не можна: правки розійдуться між контролерами.
+    param($Gpo, [string]$DcName, [string]$DomainDns)
+    $path = "\\$DcName\SYSVOL\$DomainDns\Policies\{$($Gpo.Id)}"
+    if (Test-SysvolFile "$path\GPT.INI") { return }
+    throw ("У SYSVOL на {0} немає теки GPO '{1}' ({2}). Схоже, реплікація SYSVOL між контролерами домену не працює. " +
+        "Перевірте журнал 'DFS Replication' (події 2213, 4012, 5002) і 'dcdiag /e /test:dfsrevent /test:sysvolcheck', " +
+        "виправте реплікацію і запустіть знову.") -f $DcName, $Gpo.DisplayName, $path
+}
+
+function Get-SysvolLaggingDc {
+    # Контролери домену, у SYSVOL яких немає теки GPO (GPT.INI): GPO там не застосовується
+    param([string[]]$DcNames, [guid[]]$GpoIds, [string]$DomainDns)
+    foreach ($dc in $DcNames) {
+        $missing = @($GpoIds | Where-Object { -not (Test-SysvolFile "\\$dc\SYSVOL\$DomainDns\Policies\{$_}\GPT.INI") })
+        if ($missing.Count) { $dc }
+    }
+}
+
 function Get-OrNewGpo {
     param([string]$Name, [string]$Comment, [string]$DcName)
     $g = Get-GPO -Name $Name -Server $DcName -ErrorAction SilentlyContinue
-    if ($g) { Write-Host "    існує: $Name {$($g.Id)}"; return $g }
+    if ($g) { Write-Host "    існує: $Name {$($g.Id)}"; Assert-GpoSysvol $g $DcName $domainDns; return $g }
     $g = New-GPO -Name $Name -Comment $Comment -Server $DcName
     Write-Host "    створено: $Name {$($g.Id)}"
     $g
@@ -245,13 +274,15 @@ Import-Module GroupPolicy, ActiveDirectory
 $domain = Get-ADDomain
 $domainDns = $domain.DNSRoot
 $domainDn = $domain.DistinguishedName
-$dcName = $env:COMPUTERNAME
+# GPO редагуються на емуляторі PDC, як у консолі GPMC: інакше запуск на іншому DC правив би його копію SYSVOL
+$dcName = $domain.PDCEmulator
+if ($Server) { $dcName = $Server }
 # Кілька DN можна передати одним рядком через ';' (DN самі містять коми)
 $LinkTargets = @($LinkTargets | ForEach-Object { $_ -split ';' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if (-not $LinkTargets) { $LinkTargets = @($domainDn) }
 $dcOu = $domain.DomainControllersContainer
 
-Write-Step "Домен $domainDns, працюємо з DC $dcName"
+Write-Step "Домен $domainDns, GPO редагуються на DC $dcName (запущено на $env:COMPUTERNAME)"
 
 # ---- 1. пакет
 Write-Step "Перевірка пакета $PackagePath"
@@ -343,6 +374,19 @@ foreach ($g in @(
     }
     else { Write-Host "    audit.csv і startup-скрипт: без змін" }
     foreach ($t in $g.Links) { Add-GpoLinkOnce $g.Name $t $dcName }
+}
+
+# ---- реплікація SYSVOL: GPO мають бути в SYSVOL кожного DC, інакше там вони не застосовуються
+if (-not $WhatIfPreference) {
+    $ids = @(foreach ($n in @($BaselineGpoName, $DcGpoName)) { $x = Get-GPO -Name $n -Server $dcName -ErrorAction SilentlyContinue; if ($x) { $x.Id } })
+    $dcs = @(Get-ADDomainController -Filter * | ForEach-Object { $_.HostName })
+    $lag = @(Get-SysvolLaggingDc $dcs $ids $domainDns)
+    if ($lag.Count) {
+        Write-Host ''
+        Write-Host ("Увага: у SYSVOL на {0} ще немає GPO SEC-Logging. Якщо це не мине за кілька хвилин - реплікація SYSVOL не працює: " -f ($lag -join ', ')) -ForegroundColor Yellow
+        Write-Host "       перевірте журнал 'DFS Replication' (події 2213, 4012, 5002) і 'dcdiag /e /test:dfsrevent /test:sysvolcheck'." -ForegroundColor Yellow
+    }
+    else { Write-Host "    GPO є в SYSVOL усіх DC ($($dcs.Count))" }
 }
 
 # ---- 5. SACL для DCSync / зловживань ACL
