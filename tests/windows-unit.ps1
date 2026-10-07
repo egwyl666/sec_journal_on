@@ -142,6 +142,30 @@ Assert (Test-GpoValueSame ([pscustomobject]@{ Type = [Microsoft.Win32.RegistryVa
 Assert (-not (Test-GpoValueSame ([pscustomobject]@{ Type = [Microsoft.Win32.RegistryValueKind]::DWord; Value = [uint32]1 }) @{ Type = 'DWord'; Value = 2 })) 'інше значення - перезаписується'
 Assert (-not (Test-GpoValueSame ([pscustomobject]@{ Type = [Microsoft.Win32.RegistryValueKind]::String; Value = '1' }) @{ Type = 'DWord'; Value = 1 })) 'інший тип - перезаписується'
 Assert (-not (Test-GpoValueSame $null @{ Type = 'DWord'; Value = 1 })) 'значення немає - записується'
+# GPO, якої ще немає в SYSVOL цього DC (реплікація SYSVOL не працює) - зрозуміла помилка, а не виняток з глибини GroupPolicy
+$gid = [guid]::NewGuid()
+$global:SysvolHas = $false; $global:SysvolAsked = ''
+function global:Test-SysvolFile { param([string]$Path) $global:SysvolAsked = $Path; $global:SysvolHas }
+Assert-Throws { Assert-GpoSysvol ([pscustomobject]@{ Id = $gid; DisplayName = 'SEC-Logging-Baseline' }) 'DCX' 'corp.local' } 'реплікація SYSVOL' 'GPO без теки в SYSVOL - зрозуміла помилка про реплікацію'
+Assert ($global:SysvolAsked -eq "\\DCX\SYSVOL\corp.local\Policies\{$gid}\GPT.INI") "перевіряється GPT.INI у SYSVOL саме цього DC [$global:SysvolAsked]"
+$global:SysvolHas = $true
+$ok = $true; try { Assert-GpoSysvol ([pscustomobject]@{ Id = $gid; DisplayName = 'x' }) 'DCX' 'corp.local' } catch { $ok = $false }
+Assert $ok 'GPO з текою в SYSVOL - перевірка проходить'
+$global:SysvolHasMap = @{}
+function global:Test-SysvolFile { param([string]$Path) [bool]$global:SysvolHasMap[$Path] }
+$g1 = [guid]::NewGuid(); $g2 = [guid]::NewGuid()
+foreach ($g in $g1, $g2) { $global:SysvolHasMap["\\DC01.corp.local\SYSVOL\corp.local\Policies\{$g}\GPT.INI"] = $true }
+$global:SysvolHasMap["\\DC02.corp.local\SYSVOL\corp.local\Policies\{$g1}\GPT.INI"] = $true
+$lag = @(Get-SysvolLaggingDc @('DC01.corp.local', 'DC02.corp.local') @($g1, $g2) 'corp.local')
+Assert ($lag.Count -eq 1 -and $lag[0] -eq 'DC02.corp.local') "DC, у SYSVOL якого бракує однієї з GPO, показано [$($lag -join ', ')]"
+Import-ScriptFunctions $gpo   # повертає справжню Test-SysvolFile
+# Get-GPRegistryValue кидає виняток для значення, якого ще немає в GPO (так було на DC02) - значення просто записується
+$global:SetCalls = @()
+function global:Get-GPRegistryValue { throw (New-Object System.IO.DirectoryNotFoundException 'The system cannot find the path specified.') }
+function global:Set-GPRegistryValue { $global:SetCalls += , $args }
+Set-GpoRegistryList 'SEC-Logging-Baseline' @(@{ Key = 'HKLM\SOFTWARE\X'; Name = 'A'; Type = 'DWord'; Value = 1 }) 'DCX' *> $null
+Assert ($global:SetCalls.Count -eq 1) 'значення, якого ще немає в GPO, записується (виняток Get-GPRegistryValue не зупиняє скрипт)'
+Remove-Item function:global:Get-GPRegistryValue, function:global:Set-GPRegistryValue
 Assert (@($dcCsv | Select-Object -Skip 1 | Where-Object { $_ -notmatch '^,System,Audit .+,\{[0-9a-f-]{36}\},(Success|Failure|Success and Failure),,[123]$' }).Count -eq 0) 'рядки audit.csv мають правильний формат'
 $back = ConvertFrom-AuditCsv $dcCsv
 Assert ($back['0CCE9242-69AE-11D9-BED3-505054503030'] -eq 3) 'audit.csv розбирається тим самим парсером'

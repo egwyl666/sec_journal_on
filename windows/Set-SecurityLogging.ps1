@@ -189,7 +189,7 @@ function Write-Host {
 
 #endregion
 
-$ScriptVersion = '1.3.3'
+$ScriptVersion = '1.3.4'
 $ScriptPath = $MyInvocation.MyCommand.Path
 $ScriptDir = Split-Path -Parent $ScriptPath
 $StateRegPath = 'SOFTWARE\SecLogging'

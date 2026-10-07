@@ -35,13 +35,13 @@ tests/                            тести (pwsh + docker)
 **Windows** (10/11, Server 2008 R2 … 2025, контролери домену):
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.4/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF)))"
 ```
 
 **Linux** (будь-який дистрибутив із таблиці нижче; рядок використовує `curl`, а де його немає — `wget`, наприклад на Ubuntu Desktop):
 
 ```bash
-(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/linux/install.sh) | sudo bash
+(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.4/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.4/linux/install.sh) | sudo bash
 ```
 
 Що відбувається:
@@ -85,19 +85,19 @@ sudo sh -c 'cat "$(ls -t /var/log/seclogging/changes/*-changes.txt | head -1)"'
 Лише перевірка, нічого не змінювати:
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF))) -AuditOnly"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointManager]::SecurityProtocol=3072}catch{}; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.4/windows/Start-SecLogging.ps1')).TrimStart([char]0xFEFF))) -AuditOnly"
 ```
 ```bash
-(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/linux/install.sh) | sudo bash -s -- --check
+(curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.4/linux/install.sh 2>/dev/null || wget -qO- https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.4/linux/install.sh) | sudo bash -s -- --check
 ```
 
-Машина без інтернету: завантажте `https://github.com/egwyl666/sec_journal_on/archive/refs/tags/v1.3.3.zip` на іншому комп'ютері, перенесіть і запустіть `powershell -ExecutionPolicy Bypass -File <розпаковано>\windows\Start-SecLogging.ps1 -Source <шлях до zip>` (Linux: офлайн-комплект, див. нижче).
+Машина без інтернету: завантажте `https://github.com/egwyl666/sec_journal_on/archive/refs/tags/v1.3.4.zip` на іншому комп'ютері, перенесіть і запустіть `powershell -ExecutionPolicy Bypass -File <розпаковано>\windows\Start-SecLogging.ps1 -Source <шлях до zip>` (Linux: офлайн-комплект, див. нижче).
 
 Порівняти будь-які два знімки пізніше: `Set-SecurityLogging.ps1 -CompareBefore a.tsv -CompareAfter b.tsv -CompareOut changes.txt` / `set-security-logging.sh --compare a.tsv b.tsv`.
 
 ### Версії та оновлення
 
-Команди вище закріплені на **релізі** (`v1.3.3`), а не на останньому коміті: зміна в репозиторії не потрапить на машини, доки не вийде новий реліз, і зламана гілка не зможе розіслати код на всі машини. Щоб розгорнути новий реліз, замініть у команді `v1.3.3` на новий тег. `-Ref HEAD` (Windows) / `-s -- --ref HEAD` (Linux) запускає останню версію з розробки для перевірки.
+Команди вище закріплені на **релізі** (`v1.3.4`), а не на останньому коміті: зміна в репозиторії не потрапить на машини, доки не вийде новий реліз, і зламана гілка не зможе розіслати код на всі машини. Щоб розгорнути новий реліз, замініть у команді `v1.3.4` на новий тег. `-Ref HEAD` (Windows) / `-s -- --ref HEAD` (Linux) запускає останню версію з розробки для перевірки.
 
 ## Швидкий старт (автоматично)
 
@@ -109,7 +109,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "try{[Net.ServicePointMan
 # машина з інтернетом: завантажити установник з GitHub і запустити (вставити в PowerShell)
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
 $f = "$env:TEMP\Install-SecLogging.ps1"
-(New-Object Net.WebClient).DownloadFile('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/windows/Install-SecLogging.ps1', $f)
+(New-Object Net.WebClient).DownloadFile('https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.4/windows/Install-SecLogging.ps1', $f)
 powershell -ExecutionPolicy Bypass -File $f -Fetch -AuditOnly
 
 # з клону репозиторію (спершу дозволити скрипти лише в цьому вікні;
@@ -132,14 +132,14 @@ Get-ChildItem -Recurse | Unblock-File
 | `Domain` | збирає пакет і запускає з ним `New-SecLoggingGpo.ps1` (`-WhatIfGpo` — пробний прогін, `-LinkTargets`, `-SetDomainRootSacl`) |
 
 - Коректний пакет використовується повторно. `-Rebuild` збирає його заново, а `-NoBuild` на машині без інтернету бере лише наявний пакет.
-- `-Fetch` завантажує скрипти архівом з GitHub (`-RepoRef` — гілка/тег/коміт, типово закріплений реліз `v1.3.3`).
+- `-Fetch` завантажує скрипти архівом з GitHub (`-RepoRef` — гілка/тег/коміт, типово закріплений реліз `v1.3.4`).
 - Усі параметри `Set-SecurityLogging.ps1` (`-AuditOnly`, `-SkipSysmon`, `-UpgradeSysmon`, `-DisablePowerShellV2`, `-ConfigureWazuh`, `-AllowLegacySysmon`, `-LegacySysmonVersion`, `-ReinstallSysmon`, `-TranscriptionPath`, …) передаються далі.
 
 **Linux** (root):
 
 ```bash
 # одним рядком на хості з інтернетом
-curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.3/linux/install.sh -o install.sh && sudo bash install.sh --fetch --check
+curl -fsSL https://raw.githubusercontent.com/egwyl666/sec_journal_on/v1.3.4/linux/install.sh -o install.sh && sudo bash install.sh --fetch --check
 
 # з клону
 sudo ./linux/install.sh --check                      # лише перевірка
@@ -335,7 +335,7 @@ type C:\ProgramData\SecLogging\last-report.json   :: після перезава
    mkdir C:\SecLab\updates & net share SecLab=C:\SecLab /grant:Everyone,FULL & icacls C:\SecLab /grant Everyone:(OI)(CI)F & netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes & ipconfig
    ```
 2. **Хост** (браузер, без прав адміністратора):
-   - завантажте ZIP репозиторію: <https://github.com/egwyl666/sec_journal_on/archive/refs/tags/v1.3.3.zip>;
+   - завантажте ZIP репозиторію: <https://github.com/egwyl666/sec_journal_on/archive/refs/tags/v1.3.4.zip>;
    - завантажте KB4474419 і KB4490628 (Windows Server 2008 R2, x64) з Microsoft Update Catalog;
    - у Провіднику відкрийте `\\<IP VM>\SecLab` (вхід як `<VM>\Administrator`), скопіюйте туди ZIP, а файли `.msu` — у `updates`.
 3. **VM**: правою кнопкою по ZIP → *Extract All…* → `C:\SecLab`, потім запустіть:
@@ -440,7 +440,7 @@ ID 12300–12343. Правила прив'язані до конкретних �
 |---|---|---|
 | Синтаксис обох `.ps1`, PSScriptAnalyzer (Warning/Error) | pwsh 7 на Linux | чисто |
 | PowerShell 2.0: немає конструкцій PS3+ | grep + PSUseCompatibleSyntax | чисто |
-| Юніт-тести `tests/windows-unit.ps1`: налаштування, розбір auditpol з локалізованими назвами, JSON, планування розмірів, перевірка хешів, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логіка аудиту й журналів на підмінених auditpol/wevtutil, повторний запуск нічого не змінює, запасні шляхи PowerShell 2.0 | pwsh 7 | 155/155 |
+| Юніт-тести `tests/windows-unit.ps1`: налаштування, розбір auditpol з локалізованими назвами, JSON, планування розмірів, перевірка хешів, блок Wazuh, `audit.csv`/`scripts.ini`/CSE, логіка аудиту й журналів на підмінених auditpol/wevtutil, повторний запуск нічого не змінює, запасні шляхи PowerShell 2.0 | pwsh 7 | 160/160 |
 | Правила Wazuh `tests/wazuh-rules.sh`: менеджер стартує з `seclogging_rules.xml`, 64 події (Windows через декодер eventchannel, auditd, syslog) подаються так, як їх шле агент; для кожної спрацьовує очікуване правило, а на звичайних подіях наші мовчать | wazuh-manager 4.14 у Docker | 64/64 |
 | `tests/linux-docker.sh`: check → apply → повторний apply без змін | Ubuntu 26.04 / 24.04 / 20.04, Mint 21.3, Oracle Linux 9 зі справжнім auditd; Debian 12, Rocky 9 / 8, Alma 9, CentOS 7, Fedora 40, Amazon Linux 2023, openSUSE Leap 15.6, Arch із заглушкою auditctl (їхні дзеркала були недоступні з пісочниці) | успішно (14 дистрибутивів) |
 | Встановлення auditd самим скриптом через пакетний менеджер | Ubuntu 24.04 (apt), Oracle Linux 9 (dnf) | успішно |
@@ -464,6 +464,7 @@ Windows Server 2022 DC з російським інтерфейсом, у дом
 - **Скрипт більше не чіпає підкатегорії, які задає GPO.** Локальна зміна призводила до того, що скрипт і групова політика перезаписували одне одного, а це близько сотні подій 4719 на добу (і стільки ж алертів у Wazuh). Тепер скрипт лише попереджає, якщо значення в GPO слабше за потрібне.
 - **Розмір журналу «Active Directory Web Services» адміністратор змінити не може:** його налаштування захищені ACL служби. Це тепер Warning, і решту запуску воно не блокує.
 - **Текст помилок `wevtutil` виходив «кракозябрами»** (ANSI, прочитаний як OEM). Тепер він перекодовується.
+- **Другий DC (DC02) не міг редагувати GPO.** Їх створили на DC01, а в SYSVOL на DC02 їхніх тек не було, тож групова політика падала там із «шлях не знайдено». Тепер GPO завжди редагуються на емуляторі PDC, як це робить консоль GPMC, незалежно від того, на якому DC запущено скрипт. GPO без теки в SYSVOL зупиняє запуск зрозумілим повідомленням, а не винятком. Наприкінці скрипт перевіряє SYSVOL кожного DC і попереджає, якщо на якомусь бракує наших GPO (там не працює реплікація SYSVOL).
 - **Версії GPO росли з кожним запуском,** бо кожне значення переписувалося. Тепер записуються лише реальні зміни.
 - **Малий системний диск змушує брати профіль Minimal.** При 6,6 ГБ вільних із 30 ГБ DC отримав Security 256 МБ (близько тижня історії) і PowerShell 128 МБ (кілька днів, менше, коли інструмент аудиту заливає журнал модулів). Це нормально, поки агент Wazuh відправляє події. На більшому диску наступний запуск сам вибере більший профіль.
 - **Свідомо не збирається**, і інструменти аудиту позначають це як «частково»: успішні 5145 на SYSVOL/NETLOGON (Detailed File Share на DC — лише «Відмова»), WFP 5156/5152 (замість них збирається `pfirewall.log`), 4663 без SACL на конкретних теках, аналітичний журнал DNS.
